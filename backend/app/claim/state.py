@@ -1,0 +1,66 @@
+"""
+Graph state for one claim: every document uploaded together, processed as one case.
+
+Each agent writes exactly one key. `docs` and `trace` are append-only, so the ingest loop
+adds one document per pass and the parallel branches (kyc || claims -> policy) never
+overwrite each other's output.
+"""
+
+from __future__ import annotations
+
+import operator
+from typing import Annotated, Any, TypedDict
+
+
+class DocumentIn(TypedDict, total=False):
+    doc_id: str                 # the case_record id of this page
+    file_path: str
+    file_name: str
+    doc_type_override: str | None
+
+
+class IngestedDoc(TypedDict, total=False):
+    doc_id: str
+    file_name: str
+    raw_text: str               # the preprocessor's transcription (vision model)
+    image_quality: str          # clear | blurry | unreadable
+    read_confidence: float
+    blur_variance: float
+    is_blurry: bool
+    doc_type: str               # CLAIM_FORM | ID_DOCUMENT | ... | UNKNOWN
+    classifier_confidence: float
+    classifier_source: str      # vision | human_override
+    fields: dict[str, Any]      # identity and date fields read from the page
+    error: str
+
+
+class TraceEvent(TypedDict):
+    agent: str
+    status: str                 # ok | error
+    started_at: str
+    duration_ms: int
+    note: str
+
+
+def _last_wins(_old, new):
+    return new
+
+
+class ClaimState(TypedDict, total=False):
+    claim_id: str
+    title: str
+    received_at: str
+    documents: list[DocumentIn]                         # the queue, in upload order
+
+    page: Annotated[dict[str, Any], _last_wins]         # the page being read (preprocess -> classify -> extract)
+    docs: Annotated[list[IngestedDoc], operator.add]    # one entry per finished page
+    plan: dict[str, Any]
+    kyc: dict[str, Any]
+    claims: dict[str, Any]
+    policy: dict[str, Any]
+    fraud: dict[str, Any]
+    decision: dict[str, Any]
+    review: dict[str, Any]                              # the human decision for an escalated claim
+
+    trace: Annotated[list[TraceEvent], operator.add]
+    status: Annotated[str, _last_wins]

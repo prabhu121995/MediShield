@@ -1,0 +1,30 @@
+INFO:     Started server process [20224]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51185 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51191 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50243 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50244 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50245 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62124 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62124 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62124 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62124 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52104 - "GET /api/cases HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52105 - "GET /api/dashboard/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52104 - "GET /api/patients HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52104 - "GET /api/audit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65180 - "GET /api/audit?entity_type=claim HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65180 - "GET /api/audit?entity_type=case HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65180 - "GET /api/audit?entity_type=patient HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65180 - "GET /api/audit?entity_type=policy HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65180 - "GET /api/audit?entity_type=user HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65191 - "GET /api/audit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65191 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65195 - "GET /api/policies HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65199 - "GET /api/queues/review HTTP/1.1" 200 OK

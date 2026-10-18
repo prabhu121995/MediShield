@@ -1,0 +1,168 @@
+[  1/156] claim_PT_15075.png                         0.0s conf=0.99 lines=127
+[  2/156] claim_PT_16658.png                         0.0s conf=0.99 lines=118
+[  3/156] claim_PT_17665.png                         0.0s conf=0.99 lines=129
+[  4/156] claim_PT_19116.png                         0.0s conf=0.99 lines=97
+[  5/156] claim_PT_20322.png                         0.0s conf=0.98 lines=117
+[  6/156] claim_PT_20322_dup.png                     0.0s conf=0.99 lines=121
+[  7/156] claim_PT_20745.png                         0.0s conf=0.99 lines=99
+[  8/156] claim_PT_24208.png                         0.0s conf=0.99 lines=121
+[  9/156] claim_PT_24993.png                         0.0s conf=0.99 lines=118
+[ 10/156] claim_PT_30028.png                         0.0s conf=0.99 lines=120
+[ 11/156] claim_PT_39451.png                         0.0s conf=0.99 lines=129
+[ 12/156] claim_PT_39816.png                         0.0s conf=0.98 lines=108
+[ 13/156] claim_PT_41439.png                         0.0s conf=0.99 lines=136
+[ 14/156] claim_PT_45400.png                         0.0s conf=0.99 lines=99
+[ 15/156] claim_PT_47353.png                         0.0s conf=0.99 lines=137
+[ 16/156] claim_PT_50538.png                         0.0s conf=0.99 lines=105
+[ 17/156] claim_PT_54236.png                         0.0s conf=0.99 lines=105
+[ 18/156] claim_PT_55056.png                         0.0s conf=0.99 lines=125
+[ 19/156] claim_PT_57795.png                         0.0s conf=0.99 lines=98
+[ 20/156] claim_PT_62350.png                         0.0s conf=0.99 lines=122
+[ 21/156] claim_PT_62383.png                         0.1s conf=0.98 lines=118
+[ 22/156] claim_PT_67125.png                         0.0s conf=0.99 lines=128
+[ 23/156] claim_PT_69470.png                         0.0s conf=0.99 lines=109
+[ 24/156] claim_PT_71993.png                         0.0s conf=0.99 lines=96
+[ 25/156] claim_PT_72021.png                         0.1s conf=0.99 lines=137
+[ 26/156] claim_PT_74454.png                         0.0s conf=0.98 lines=120
+[ 27/156] claim_PT_81810.png                         0.0s conf=0.99 lines=111
+[ 28/156] claim_PT_82132.png                         0.0s conf=0.99 lines=126
+[ 29/156] claim_PT_88139.png                         0.0s conf=0.98 lines=128
+[ 30/156] claim_PT_99687.png                         0.1s conf=0.99 lines=137
+[ 31/156] claim_PT_99733.png                         0.0s conf=0.99 lines=137
+[ 32/156] pp.png                                   SKIPPED UnidentifiedImageError: cannot identify image file 'D:\\Project\\AI\\Project\\dataset\\claim_forms\\pp.png'
+[32m[INFO] 2026-10-17 21:15:50,451 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-10-17 21:15:50,699 [RapidOCR] download_file.py:60: File exists and is valid: D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\PP-OCRv6_det_small.onnx[0m
+[32m[INFO] 2026-10-17 21:15:50,699 [RapidOCR] main.py:63: Using D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\PP-OCRv6_det_small.onnx[0m
+[32m[INFO] 2026-10-17 21:15:56,574 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-10-17 21:15:56,581 [RapidOCR] download_file.py:60: File exists and is valid: D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\ch_ppocr_mobile_v2.0_cls_mobile.onnx[0m
+[32m[INFO] 2026-10-17 21:15:56,582 [RapidOCR] main.py:63: Using D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\ch_ppocr_mobile_v2.0_cls_mobile.onnx[0m
+[32m[INFO] 2026-10-17 21:15:57,013 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-10-17 21:15:57,180 [RapidOCR] download_file.py:60: File exists and is valid: D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\PP-OCRv6_rec_small.onnx[0m
+[32m[INFO] 2026-10-17 21:15:57,180 [RapidOCR] main.py:63: Using D:\Project\AI\Project\.venv\Lib\site-packages\rapidocr\models\PP-OCRv6_rec_small.onnx[0m
+[ 33/156] discharge_PT_15075.png                    12.7s conf=0.99 lines=47
+[ 34/156] discharge_PT_16658.png                    10.2s conf=0.99 lines=46
+[ 35/156] discharge_PT_17665.png                    10.4s conf=0.99 lines=57
+[ 36/156] discharge_PT_19116.png                    11.1s conf=0.98 lines=40
+[ 37/156] discharge_PT_20322.png                    11.7s conf=0.98 lines=38
+[ 38/156] discharge_PT_20745.png                    10.7s conf=0.99 lines=48
+[ 39/156] discharge_PT_24208.png                    10.2s conf=0.99 lines=38
+[ 40/156] discharge_PT_24993.png                    10.7s conf=0.97 lines=38
+[ 41/156] discharge_PT_30028.png                    10.4s conf=0.97 lines=38
+[ 42/156] discharge_PT_39451.png                    10.6s conf=0.99 lines=56
+[ 43/156] discharge_PT_39816.png                    11.1s conf=0.99 lines=57
+[ 44/156] discharge_PT_41439.png                    11.2s conf=0.99 lines=59
+[ 45/156] discharge_PT_45400.png                    10.0s conf=0.99 lines=52
+[ 46/156] discharge_PT_47353.png                    11.9s conf=0.98 lines=41
+[ 47/156] discharge_PT_50538.png                    10.6s conf=0.99 lines=55
+[ 48/156] discharge_PT_54236.png                    10.3s conf=0.98 lines=40
+[ 49/156] discharge_PT_55056.png                    11.1s conf=0.99 lines=56
+[ 50/156] discharge_PT_57795.png                    11.7s conf=0.98 lines=40
+[ 51/156] discharge_PT_62350.png                    10.8s conf=0.99 lines=54
+[ 52/156] discharge_PT_62383.png                    10.7s conf=0.98 lines=40
+[ 53/156] discharge_PT_67125.png                    10.0s conf=0.99 lines=55
+[ 54/156] discharge_PT_69470.png                    11.4s conf=0.99 lines=60
+[ 55/156] discharge_PT_71993.png                    10.2s conf=0.97 lines=47
+[ 56/156] discharge_PT_72021.png                    10.1s conf=0.98 lines=49
+[ 57/156] discharge_PT_74454.png                    10.5s conf=0.99 lines=46
+[ 58/156] discharge_PT_81810.png                    10.9s conf=0.98 lines=42
+[ 59/156] discharge_PT_82132.png                    10.5s conf=0.99 lines=40
+[ 60/156] discharge_PT_88139.png                    11.1s conf=0.99 lines=55
+[ 61/156] discharge_PT_99687.png                    10.8s conf=0.98 lines=50
+[ 62/156] discharge_PT_99733.png                    10.6s conf=0.99 lines=59
+[ 63/156] id_PT_15075.png                            3.7s conf=0.99 lines=31
+[ 64/156] id_PT_16658.png                            3.5s conf=0.98 lines=23
+[ 65/156] id_PT_17665.png                            3.2s conf=1.00 lines=28
+[ 66/156] id_PT_19116.png                            3.4s conf=0.99 lines=17
+[ 67/156] id_PT_20322.png                            2.9s conf=1.00 lines=17
+[ 68/156] id_PT_20745.png                            3.1s conf=0.99 lines=18
+[ 69/156] id_PT_24208.png                            3.6s conf=0.99 lines=18
+[ 70/156] id_PT_24993.png                            3.0s conf=1.00 lines=18
+[ 71/156] id_PT_30028.png                            3.0s conf=1.00 lines=17
+[ 72/156] id_PT_39451.png                            2.7s conf=0.98 lines=19
+[ 73/156] id_PT_39816.png                            2.6s conf=1.00 lines=19
+[ 74/156] id_PT_41439.png                            3.2s conf=0.99 lines=19
+[ 75/156] id_PT_45400.png                            2.8s conf=0.99 lines=18
+[ 76/156] id_PT_47353.png                            2.5s conf=0.98 lines=20
+[ 77/156] id_PT_50538.png                            2.5s conf=0.98 lines=18
+[ 78/156] id_PT_54236.png                            3.2s conf=0.98 lines=23
+[ 79/156] id_PT_55056.png                            2.8s conf=0.99 lines=23
+[ 80/156] id_PT_57795.png                            2.7s conf=0.99 lines=17
+[ 81/156] id_PT_62350.png                            2.4s conf=0.99 lines=17
+[ 82/156] id_PT_62383.png                            2.7s conf=1.00 lines=18
+[ 83/156] id_PT_67125.png                            2.8s conf=0.98 lines=18
+[ 84/156] id_PT_69470.png                            3.0s conf=0.99 lines=28
+[ 85/156] id_PT_71993.png                            3.7s conf=0.98 lines=24
+[ 86/156] id_PT_72021.png                            2.9s conf=0.98 lines=23
+[ 87/156] id_PT_74454.png                            3.0s conf=1.00 lines=28
+[ 88/156] id_PT_81810.png                            3.0s conf=1.00 lines=28
+[ 89/156] id_PT_82132.png                            2.4s conf=1.00 lines=18
+[ 90/156] id_PT_88139.png                            2.3s conf=0.99 lines=17
+[ 91/156] id_PT_99687.png                            3.2s conf=1.00 lines=28
+[ 92/156] id_PT_99733.png                            3.0s conf=0.98 lines=24
+[ 93/156] amend_PT_15075.png                        10.4s conf=0.99 lines=75
+[ 94/156] amend_PT_16658.png                         9.2s conf=0.99 lines=47
+[ 95/156] amend_PT_17665.png                         9.3s conf=0.99 lines=47
+[ 96/156] amend_PT_19116.png                         8.4s conf=0.99 lines=62
+[ 97/156] amend_PT_20322.png                         8.9s conf=0.99 lines=47
+[ 98/156] amend_PT_20745.png                         9.8s conf=0.99 lines=49
+[ 99/156] amend_PT_24208.png                         9.2s conf=0.98 lines=66
+[100/156] amend_PT_24993.png                         8.4s conf=0.99 lines=64
+[101/156] amend_PT_30028.png                         9.0s conf=0.99 lines=64
+[102/156] amend_PT_39451.png                         8.7s conf=0.99 lines=62
+[103/156] amend_PT_39816.png                         9.5s conf=0.99 lines=48
+[104/156] amend_PT_41439.png                         8.5s conf=0.99 lines=63
+[105/156] amend_PT_45400.png                         9.8s conf=0.99 lines=47
+[106/156] amend_PT_47353.png                         8.9s conf=0.99 lines=47
+[107/156] amend_PT_50538.png                         8.6s conf=0.99 lines=63
+[108/156] amend_PT_54236.png                        10.0s conf=0.99 lines=47
+[109/156] amend_PT_55056.png                         9.8s conf=0.98 lines=49
+[110/156] amend_PT_57795.png                         8.7s conf=0.99 lines=47
+[111/156] amend_PT_62350.png                         7.8s conf=0.99 lines=63
+[112/156] amend_PT_62383.png                         9.2s conf=0.98 lines=62
+[113/156] amend_PT_67125.png                         9.5s conf=0.99 lines=47
+[114/156] amend_PT_69470.png                         8.8s conf=0.99 lines=47
+[115/156] amend_PT_71993.png                         8.4s conf=0.99 lines=47
+[116/156] amend_PT_72021.png                         9.5s conf=0.99 lines=47
+[117/156] amend_PT_74454.png                         8.8s conf=0.99 lines=47
+[118/156] amend_PT_81810.png                         8.3s conf=0.99 lines=47
+[119/156] amend_PT_82132.png                         9.1s conf=0.98 lines=50
+[120/156] amend_PT_88139.png                         9.2s conf=0.98 lines=50
+[121/156] amend_PT_99687.png                         9.5s conf=0.99 lines=47
+[122/156] amend_PT_99733.png                         9.3s conf=0.98 lines=50
+[123/156] rx_PT_15075.png                            6.6s conf=0.99 lines=42
+[124/156] rx_PT_16658.png                            6.8s conf=0.99 lines=44
+[125/156] rx_PT_17665.png                            6.9s conf=0.97 lines=53
+[126/156] rx_PT_19116.png                            8.1s conf=0.98 lines=67
+[127/156] rx_PT_20322.png                            6.4s conf=0.99 lines=51
+[128/156] rx_PT_20745.png                            7.3s conf=0.98 lines=48
+[129/156] rx_PT_24208.png                            7.3s conf=0.99 lines=54
+[130/156] rx_PT_24993.png                            7.7s conf=0.99 lines=51
+[131/156] rx_PT_30028.png                            6.8s conf=0.99 lines=52
+[132/156] rx_PT_39451.png                            6.9s conf=0.94 lines=50
+[133/156] rx_PT_39816.png                            6.3s conf=0.97 lines=46
+[134/156] rx_PT_41439.png                            7.3s conf=0.97 lines=57
+[135/156] rx_PT_45400.png                            6.1s conf=0.98 lines=46
+[136/156] rx_PT_47353.png                            6.7s conf=0.98 lines=58
+[137/156] rx_PT_50538.png                            7.2s conf=0.97 lines=46
+[138/156] rx_PT_54236.png                            6.6s conf=0.99 lines=58
+[139/156] rx_PT_55056.png                            7.1s conf=0.98 lines=56
+[140/156] rx_PT_57795.png                            7.1s conf=0.99 lines=64
+[141/156] rx_PT_62350.png                            7.3s conf=0.99 lines=57
+[142/156] rx_PT_62383.png                            7.4s conf=0.98 lines=67
+[143/156] rx_PT_67125.png                            5.7s conf=0.99 lines=40
+[144/156] rx_PT_69470.png                            7.1s conf=0.97 lines=54
+[145/156] rx_PT_71993.png                            6.9s conf=0.99 lines=47
+[146/156] rx_PT_72021.png                            7.0s conf=0.97 lines=46
+[147/156] rx_PT_74454.png                            5.7s conf=0.99 lines=42
+[148/156] rx_PT_81810.png                            7.9s conf=0.98 lines=66
+[149/156] rx_PT_82132.png                            6.5s conf=0.99 lines=58
+[150/156] rx_PT_88139.png                            7.1s conf=0.99 lines=50
+[151/156] rx_PT_99687.png                            6.1s conf=0.99 lines=45
+[152/156] rx_PT_99733.png                            7.4s conf=0.99 lines=53
+[153/156] unknown_bank_statement_001.png            13.9s conf=0.98 lines=127
+[33m[WARNING] 2026-10-17 21:31:01,493 [RapidOCR] main.py:164: The text detection result is empty[0m
+[154/156] unknown_blank_scan_001.png                 4.1s conf=0.00 lines=0
+[33m[WARNING] 2026-10-17 21:31:04,928 [RapidOCR] main.py:164: The text detection result is empty[0m
+[155/156] unknown_blurry_scan_001.png                3.4s conf=0.00 lines=0
+[156/156] unknown_utility_bill_001.png              10.1s conf=0.98 lines=95
+done: 156 images in 929s

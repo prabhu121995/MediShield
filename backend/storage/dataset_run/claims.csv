@@ -1,0 +1,2 @@
+claim,patient,bundle_id,pages,expected,expected_reason,predicted,match,confidence,expected_fraud,predicted_tags,justification
+C_016,PT_50538,d875a033-c758-4798-bba1-bada917ace65,5,APPROVE,clean,ESCALATE,False,0.913,,date_conflict,"Escalated to human review: fraud score 0.60 (date_conflict); KYC failed: no member with policy NPI-123456789, MED-GOLD-1744692, MED-GLD-1744662, MED-GOLD-1744682; procedure not covered: ; schema invalid: claim_PT_50538.png: MISSING_FIELD physician_signature; rx_PT_50538.png: MARKED_MISSING string"

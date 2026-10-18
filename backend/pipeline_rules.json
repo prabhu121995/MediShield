@@ -1,0 +1,93 @@
+{
+  "_about": "Business rules for the claim pipeline. Edit here, not in code. Path override: PIPELINE_RULES env var.",
+
+  "document_types": {
+    "CLAIM_FORM": {
+      "description": "medical insurance claim / bill (e.g. CMS-1500, UB-04): billed procedures, diagnoses, charges, provider",
+      "fields": {
+        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "claim_number": "string", "service_date": "date", "admission_date": "date", "discharge_date": "date",
+        "claim_amount": "number (total billed)", "icd10_codes": "list of strings", "cpt_codes": "list of strings",
+        "provider_npi": "string (rendering provider NPI)", "physician_signature": "string (signing physician) or null if unsigned"
+      },
+      "required": ["claim_amount", "icd10_codes", "cpt_codes", "provider_npi", "service_date", "physician_signature"]
+    },
+    "ID_DOCUMENT": {
+      "description": "identity or insurance card: driver's licence, state ID, passport, Medicare card, insurer member card",
+      "fields": {
+        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "id_kind": "string", "id_expiry_date": "date",
+        "card_marked_invalid": "boolean (the card itself states it is expired, invalid or not valid for benefits)",
+        "invalid_text": "string (the exact wording, if any)"
+      },
+      "required": []
+    },
+    "DISCHARGE_SUMMARY": {
+      "description": "hospital discharge summary / report: admission, discharge, diagnoses, hospital course",
+      "fields": {
+        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "admission_date": "date", "discharge_date": "date", "prior_discharge_date": "date (an earlier stay mentioned, if any)",
+        "icd10_codes": "list of strings", "cpt_codes": "list of strings", "billed_total": "number"
+      },
+      "required": []
+    },
+    "PRESCRIPTION": {
+      "description": "prescription written by a prescriber: medicines, sig, refills, prescriber signature",
+      "fields": {
+        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "prescription_date": "date", "prescriber": "string", "prescriber_npi": "string",
+        "prescriber_signature": "string or null if unsigned", "medications": "list of strings", "icd10_codes": "list of strings"
+      },
+      "required": ["prescription_date", "prescriber", "prescriber_npi", "prescriber_signature", "medications"]
+    },
+    "POLICY_AMENDMENT": {
+      "description": "insurer form requesting a change to a policy (endorsement / amendment request)",
+      "fields": {
+        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "effective_date": "date", "request": "string"
+      },
+      "required": []
+    }
+  },
+
+  "plans_by_policy_prefix": {"MED-GLD-": "GOLD", "MED-SLV-": "SILVER"},
+
+  "required_documents": ["CLAIM_FORM", "ID_DOCUMENT"],
+  "medical_documents": ["CLAIM_FORM", "DISCHARGE_SUMMARY", "PRESCRIPTION"],
+  "treatment_date_sources": [["CLAIM_FORM", "service_date"], ["DISCHARGE_SUMMARY", "admission_date"], ["PRESCRIPTION", "prescription_date"]],
+
+  "thresholds": {
+    "agent_confidence_min": 0.6,
+    "classifier_confidence_min": 0.6,
+    "fraud_escalate_min": 0.3,
+    "blur_variance_min": 100.0,
+    "blurry_page_confidence": 0.4
+  },
+
+  "confidence_weights": {"ingest": 0.15, "kyc": 0.25, "claims": 0.20, "policy": 0.20, "fraud": 0.20},
+
+  "kyc": {
+    "_about": "KYC only checks that the claimant's name is a member, and that an insurance card does not say it is invalid. Every other identity check is a fraud tag.",
+    "insurance_card_keywords": ["insurance", "member", "medicare", "health plan"],
+    "card_invalid_phrases": ["CARD EXPIRED", "EXPIRED CARD", "NOT VALID", "INVALID"],
+    "ignore_phrases": ["NOT VALID FOR FEDERAL PURPOSES"]
+  },
+
+  "fraud": {
+    "id_expired": {"severity": 0.6},
+    "dob_mismatch": {"severity": 0.6},
+    "policy_mismatch": {"severity": 0.5},
+    "duplicate_claim": {"severity": 0.9},
+    "amount_under_10k": {"severity": 0.6, "low": 9000, "high": 10000},
+    "proc_diag_mismatch": {"severity": 0.5, "procedure_ranges": [[59000, 59899]], "required_diagnosis_prefixes": ["O"]},
+    "name_mismatch": {"severity": 0.7},
+    "readmission_30d": {"severity": 0.7, "days": 30},
+    "date_conflict": {"severity": 0.6, "days": 45}
+  },
+
+  "policy": {
+    "retrieval_query": "excluded procedures and excluded CPT code ranges",
+    "clauses_per_query": 4,
+    "min_retrieval_score": 0.3
+  }
+}

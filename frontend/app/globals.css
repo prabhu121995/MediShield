@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { -webkit-font-smoothing: antialiased; }
+  body { @apply bg-slate-50 text-slate-900 antialiased; }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl bg-white ring-1 ring-slate-200/80 shadow-sm;
+  }
+  /* KPI tiles: soft layered shadow, lifts with a tinted glow on hover (tone class adds the tint). */
+  .card-elevated {
+    @apply rounded-2xl bg-white ring-1 ring-slate-200/70 transition-all duration-300 ease-out
+      shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_-4px_rgba(15,23,42,0.10)]
+      hover:-translate-y-1 hover:shadow-xl hover:ring-slate-300/80;
+  }
+  /* A diagonal light sweep across a tile on hover. */
+  .kpi-shine {
+    @apply pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/60 to-transparent
+      transition-transform duration-700 ease-out group-hover:translate-x-full;
+  }
+  /* Sidebar item: rounded pill, slides a little on hover; the active item is a raised gradient pill. */
+  .nav-item {
+    @apply relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200
+      hover:translate-x-0.5 hover:bg-gradient-to-r hover:from-slate-100 hover:to-white hover:text-slate-900 hover:shadow-sm;
+  }
+  .nav-item-active {
+    @apply bg-gradient-to-r from-brand-600 to-indigo-500 text-white shadow-md shadow-brand-600/30 ring-1 ring-white/20
+      hover:from-brand-600 hover:to-indigo-500 hover:text-white hover:shadow-lg hover:shadow-brand-600/30;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition duration-200 hover:-translate-y-px hover:bg-brand-700 hover:shadow-md active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-slate-600 transition duration-200 hover:bg-slate-100 hover:text-slate-900;
+  }
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition duration-200 placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-slate-700;
+  }
+  .th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500;
+  }
+  .td {
+    @apply px-4 py-3.5 text-sm text-slate-700;
+  }
+}
+
+@layer base {
+  /* One visible focus style for every control, for keyboard users. */
+  :focus-visible {
+    outline: 2px solid theme('colors.brand.500');
+    outline-offset: 2px;
+    border-radius: 0.5rem;
+  }
+  ::selection {
+    background: theme('colors.brand.100');
+  }
+}
+
+@layer components {
+  /* Loading placeholder with a moving highlight. Size it with width and height classes. */
+  .skeleton {
+    @apply rounded-xl bg-slate-200/80 bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.7),transparent)] bg-[length:200%_100%] animate-shimmer;
+  }
+}
+
+/* Honour the user's motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

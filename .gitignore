@@ -1,0 +1,53 @@
+cat > .gitignore << 'EOF'
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+
+# local data generated
+dataset/*
+
+# Next js env
+frontend/.env.local
+frontend/.env*local
+frontend/node_modules/*
+
+frontend/node_modules/*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+EOF
+
+backend/storage/qdrant/.lock
+
+# Cache
+.cache/*
+
+# JWT secret
+backend/storage/jwt_secret.key
+
+# Runtime storage (keep folders via .gitkeep if needed)
+backend/storage/ocr_cache/*
+backend/storage/uploads/*
+backend/storage/vision_cache/*
+
+# Next.js build output
+frontend/.next/
