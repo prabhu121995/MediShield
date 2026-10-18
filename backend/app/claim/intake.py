@@ -7,12 +7,15 @@ Upload checks that read nothing but the file names, so they cost no model calls.
                      e.g. PT_19116), which are insurance member IDs
     resolve_patient  what a reference means: a registered patient, a member with no patient
                      yet (one is created at upload), or nobody known
+    identify_member  after the pages are read: the member the claim is for, from what every
+                     page prints (member ID / policy number, then name + date of birth)
 """
 
 from __future__ import annotations
 
 import re
 import uuid
+from collections import Counter
 
 from app import audit, config, db
 
@@ -45,6 +48,38 @@ def resolve_patient(member_id: str) -> dict:
         return {"member_id": member_id, "status": "new", "patient": None,
                 "member": {"full_name": member["full_name"], "policy_number": member.get("policy_number")}}
     return {"member_id": member_id, "status": "unknown", "patient": None, "member": None}
+
+
+def identify_member(docs: list[dict], kyc_member: dict | None = None) -> tuple[dict | None, str | None]:
+    """(member, how it was found) for a claim's read pages, or (None, None).
+
+    Pages print the policy number as often as the member ID, and either one in either field,
+    so every member_id / policy_number value on every page is tried against both member
+    columns, the value seen on most pages first. Then name + date of birth (one exact member),
+    then the member KYC already picked."""
+    repo = db.get_repository()
+    values: Counter[str] = Counter()
+    where: dict[str, str] = {}
+    for d in docs:
+        f = d.get("fields") or {}
+        for key in ("member_id", "policy_number"):
+            v = str(f.get(key) or "").strip().upper()
+            if v:
+                values[v] += 1
+                where.setdefault(v, f"{key} {v} on {d.get('file_name') or d.get('doc_type')}")
+    for v, _ in values.most_common():
+        member = repo.find_member(v) or repo.find_member_by_policy(v)
+        if member is not None:
+            return member, where[v]
+    for d in docs:
+        f = d.get("fields") or {}
+        if f.get("patient_name") and f.get("date_of_birth"):
+            member = repo.find_member_by_name_dob(f["patient_name"], f["date_of_birth"])
+            if member is not None:
+                return member, f"name and date of birth on {d.get('file_name') or d.get('doc_type')}"
+    if kyc_member and kyc_member.get("member_id"):
+        return kyc_member, "KYC name match"
+    return None, None
 
 
 def register_patient(member_id: str, created_by: str) -> str | None:

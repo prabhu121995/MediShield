@@ -50,7 +50,7 @@ export default async function ClaimQueue({ name, params = {} }: { name: QueueNam
     serverApi<Patient[]>("/api/patients").catch(() => [] as Patient[]),
   ]);
   const { rows: queue, hasNext } = pageRows(fetched);
-  const names = new Map(patients.map((p) => [p.patient_id, p.full_name]));
+  const names = new Map(patients.map((p) => [p.patient_id, p]));
   const copy = COPY[name];
   const path = `/${name}`;
   const waiting = name === "review" || name === "escalated";

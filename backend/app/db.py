@@ -547,6 +547,22 @@ def update_bundle(bundle_id: str, status: str, decision: str | None = None,
     _execute(f"UPDATE claim_bundle SET {', '.join(sets)} WHERE bundle_id=%s", (*args, bundle_id))
 
 
+def link_bundle_patient(bundle_id: str, patient_id: str) -> bool:
+    """Link a claim (and its pages) to a patient, if it has none yet. True when it was linked."""
+    conn = _connect(config.MYSQL_DB)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE claim_bundle SET patient_id=%s WHERE bundle_id=%s AND patient_id IS NULL",
+                        (patient_id, bundle_id))
+            linked = cur.rowcount > 0
+            if linked:
+                cur.execute("UPDATE case_record SET patient_id=%s WHERE bundle_id=%s AND patient_id IS NULL",
+                            (patient_id, bundle_id))
+        return linked
+    finally:
+        conn.close()
+
+
 def bundle_documents(bundle_id: str) -> list[dict]:
     """The pages of a claim in upload order, with their stored result (file path, ingest output)."""
     rows = _fetch("SELECT * FROM case_record WHERE bundle_id=%s ORDER BY created_at, file_name", (bundle_id,))

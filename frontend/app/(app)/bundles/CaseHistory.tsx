@@ -2,13 +2,13 @@ import Link from "next/link";
 import ClaimRow from "@/components/ClaimRow";
 import Pager from "@/components/Pager";
 import SearchBox from "@/components/SearchBox";
-import { ClaimBundle } from "@/lib/api";
+import { ClaimBundle, Patient } from "@/lib/api";
 import { Params } from "@/lib/paging";
 
 // Row 3: one row per case file, newest first, searchable and paged. Each row shows the five
 // document slots.
 export default function CaseHistory({ bundles, names, params, page, hasNext }: {
-  bundles: ClaimBundle[]; names: Map<string, string>; params: Params; page: number; hasNext: boolean;
+  bundles: ClaimBundle[]; names: Map<string, Patient>; params: Params; page: number; hasNext: boolean;
 }) {
   return (
     <section id="claims" aria-labelledby="panel-history" className="card animate-fade-up p-5 [animation-delay:120ms]">

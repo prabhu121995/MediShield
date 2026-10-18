@@ -22,7 +22,7 @@ export default async function CaseFilesPage({ searchParams }: { searchParams: Pr
     serverApi<Active>("/api/claim-bundles/active").catch(() => ({ active: null })),
     serverApi<ClaimRequirements>("/api/claim-bundles/requirements").catch(() => null),
   ]);
-  const names = new Map(patients.map((p) => [p.patient_id, p.full_name]));
+  const names = new Map(patients.map((p) => [p.patient_id, p]));
   const { rows: bundles, hasNext } = pageRows(fetched);
 
   return (

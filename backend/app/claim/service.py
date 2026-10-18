@@ -38,6 +38,7 @@ from typing import Any
 from app import audit, config, db
 from langgraph.types import Command
 
+from app.claim import intake
 from app.claim._node import ClaimCancelled, current_claim, set_cancel_check
 from app.claim.graph import get_claim_graph
 from app.claim.hold import problem_pages, stage_of
@@ -138,6 +139,23 @@ def _persist_documents(claim_id: str, state: dict) -> None:
                       "result": {"file_path": row["result"]["file_path"], "ingest": doc}})
 
 
+def link_patient(claim_id: str, docs: list[dict], kyc_member: dict | None = None) -> str | None:
+    """Link a claim with no patient to the member its pages name (registering the patient from
+    the member record if needed). The patient id, or None when no member could be found."""
+    bundle = db.get_bundle(claim_id, with_result=False)
+    if bundle is None or bundle.get("patient_id"):
+        return bundle and bundle.get("patient_id")
+    member, found_by = intake.identify_member(docs, kyc_member)
+    if member is None:
+        return None
+    patient_id = intake.register_patient(member["member_id"], bundle.get("created_by") or "system")
+    if patient_id and db.link_bundle_patient(claim_id, patient_id):
+        audit.record(claim_id, "orchestrator", "patient_linked",
+                     detail={"member_id": member["member_id"], "full_name": member.get("full_name"),
+                             "patient_id": patient_id, "found_by": found_by})
+    return patient_id
+
+
 def _persist_history(claim_id: str, state: dict) -> None:
     """Store the claim and its stays so later claims are checked against them."""
     claims = state.get("claims") or {}
@@ -179,6 +197,10 @@ def _agent_errors(state: dict) -> list[str]:
 def _finish(claim_id: str, thread_id: str, state: dict) -> None:
     """Store the outcome of a run that ended or paused."""
     _persist_documents(claim_id, state)
+    try:
+        link_patient(claim_id, pages_of(state), (state.get("kyc") or {}).get("member"))
+    except Exception:                              # the patient link is a convenience; never fail the claim on it
+        log.exception("claim %s: patient not linked", claim_id)
     if waiting_on_hold(thread_id):                 # a page needs a person before the run goes on
         pages = problem_pages(state)
         step = stage_of(state)

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Badge from "@/components/Badge";
-import { CaseSummary, ClaimBundle, DocType } from "@/lib/api";
+import { CaseSummary, ClaimBundle, DocType, Patient } from "@/lib/api";
 
 function fmt(iso: string) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -90,9 +90,10 @@ function DocSlots({ docs }: { docs: CaseSummary[] }) {
 }
 
 // One claim as a row, the same in "All claims" and every queue: title (and an optional line
-// under it, e.g. why it is in the queue), patient, the five document slots, date and status.
+// under it, e.g. why it is in the queue), patient (name and member ID), the five document slots,
+// date and status.
 export default function ClaimRow({ claim, patient, status, subtitle }: {
-  claim: ClaimBundle; patient?: string; status?: string | null; subtitle?: React.ReactNode;
+  claim: ClaimBundle; patient?: Pick<Patient, "full_name" | "member_id">; status?: string | null; subtitle?: React.ReactNode;
 }) {
   return (
     <Link href={`/bundles/${claim.bundle_id}`}
@@ -101,8 +102,13 @@ export default function ClaimRow({ claim, patient, status, subtitle }: {
         <span className="block truncate text-sm font-medium text-slate-900">{claim.title}</span>
         {subtitle && <span className="mt-0.5 block truncate text-xs text-slate-500">{subtitle}</span>}
       </span>
-      <span className="hidden w-40 shrink-0 truncate text-xs text-slate-500 lg:block">
-        {claim.patient_id ? (patient ?? "Patient") : "No patient"}
+      <span className="hidden w-44 shrink-0 lg:block">
+        {claim.patient_id ? (
+          <>
+            <span className="block truncate text-xs font-medium text-slate-700">{patient?.full_name ?? "Patient"}</span>
+            {patient?.member_id && <span className="block truncate text-[11px] text-slate-400">{patient.member_id}</span>}
+          </>
+        ) : <span className="text-xs text-slate-400">No patient</span>}
       </span>
       <DocSlots docs={claim.documents} />
       <span className="hidden w-36 shrink-0 text-xs text-slate-500 xl:block">{fmt(claim.created_at)}</span>
