@@ -13,7 +13,7 @@ function fmtSize(bytes: number) {
 
 // One claim = every document of one patient episode, uploaded with one button. No document
 // types are chosen here: the classifier agent reads each page and decides (or marks it UNKNOWN).
-export default function NewCaseForm({ patients }: { patients: Pick<Patient, "patient_id" | "full_name" | "member_id">[] }) {
+export default function NewCaseForm({ patients, locked = false }: { patients: Pick<Patient, "patient_id" | "full_name" | "member_id">[]; locked?: boolean }) {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [patientId, setPatientId] = useState("");
@@ -71,7 +71,7 @@ export default function NewCaseForm({ patients }: { patients: Pick<Patient, "pat
           </div>
         </div>
         <div className="flex items-center gap-2 lg:shrink-0">
-          <button type="submit" disabled={busy || files.length === 0} className="btn-primary h-[42px] px-5">
+          <button type="submit" disabled={busy || locked || files.length === 0} className="btn-primary h-[42px] px-5" title={locked ? "Another claim is processing; only one runs at a time" : undefined}>
             {busy && <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden />}
             {busy ? "Uploading…" : `Upload & process${files.length ? ` (${files.length})` : ""}`}
           </button>

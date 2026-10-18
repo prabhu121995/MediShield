@@ -190,7 +190,18 @@ export function askPolicy(message: string, history: { role: "user" | "assistant"
 }
 
 export type ClaimStatus =
-  | "EMPTY" | "QUEUED" | "PROCESSING" | "FAILED" | "NEEDS_REVIEW" | "REJECTED" | "APPROVED" | "REVIEWED";
+  | "EMPTY" | "QUEUED" | "PROCESSING" | "FAILED" | "NEEDS_REVIEW" | "REJECTED" | "APPROVED" | "REVIEWED"
+  | "ON_HOLD" | "STOPPED";
+
+/** Why a claim is ON_HOLD: page reading incomplete ("ingest") or an agent failed ("agents"). */
+export interface ClaimHold {
+  stage: "ingest" | "agents";
+  reasons: string[];
+  pages?: { doc_id: string; file_name: string; reason: string }[];
+  action?: "continue" | "stop";
+  note?: string;
+  reviewer?: string;
+}
 
 export interface AgentSummary {
   status: "ok" | "error" | "not_run";
@@ -239,7 +250,9 @@ export interface FraudAnomaly {
 export interface ClaimResult {
   error?: string;
   thread_id?: string;          // LangGraph checkpoint thread of the latest run
-  awaiting_human?: boolean;    // the run is paused at human_review
+  awaiting_human?: boolean;    // the run is paused for a person (hold or human_review)
+  awaiting?: "ingest_hold" | "human_review" | null;
+  hold?: ClaimHold | null;
   review?: ClaimOverride | null;
   plan?: { agents: string[]; document_counts: Record<string, number>; unknown_documents: string[]; missing_required: string[] };
   kyc?: { kyc_passed: boolean; flags: string[]; checks: KycCheck[]; reference_date: string; confidence: number; summary: string; error?: string;
@@ -313,6 +326,30 @@ export function reviewClaim(id: string, body: { decision?: Decision; note?: stri
 
 export function rerunClaim(id: string) {
   return call<ClaimBundle>(`/claim-bundles/${id}/rerun`, { method: "POST" });
+}
+
+// Human in the loop for a claim ON_HOLD after page reading.
+export function resolveHold(id: string, action: "continue" | "stop", note?: string) {
+  return call<ClaimBundle>(`/claim-bundles/${id}/hold`, jsonInit("POST", { action, note }));
+}
+
+// Stop a claim; a running one stops before its next agent starts.
+export function stopClaim(id: string, note?: string) {
+  return call<ClaimBundle & { stop: "STOPPING" | "STOPPED" }>(`/claim-bundles/${id}/stop`, jsonInit("POST", { note }));
+}
+
+// Re-upload one page of the claim (an UNKNOWN or unreadable one), then the claim re-runs.
+export function replaceDocument(id: string, docId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return call<ClaimBundle>(`/claim-bundles/${id}/documents/${docId}/replace`, { method: "POST", body: form });
+}
+
+// Re-upload every page of the claim, then it re-runs.
+export function replaceAllDocuments(id: string, files: File[]) {
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+  return call<ClaimBundle>(`/claim-bundles/${id}/replace`, { method: "POST", body: form });
 }
 
 // Every file in one request; no categories, so the classifier decides each page's type.

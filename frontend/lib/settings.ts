@@ -20,3 +20,6 @@ export function allowedFile(name: string): boolean {
 
 export const SINGLE_UPLOAD_EXTENSIONS = required("NEXT_PUBLIC_SINGLE_UPLOAD_EXTENSIONS", process.env.NEXT_PUBLIC_SINGLE_UPLOAD_EXTENSIONS)
   .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+
+// An agent running longer than this is shown as "in progress, continuing in the background".
+export const LONG_STEP_S = Number(required("NEXT_PUBLIC_LONG_STEP_S", process.env.NEXT_PUBLIC_LONG_STEP_S));

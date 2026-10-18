@@ -162,12 +162,28 @@ class ClaimGraphTests(unittest.TestCase):
 
     def test_every_step_is_audited_with_a_timestamp(self):
         self.run_claim(claim=claim(), id=id_card())
-        actors = [e["actor"] for e in self.events]
+        done = [e["actor"] for e in self.events if e["event"] == "agent_completed"]
+        begun = [e["actor"] for e in self.events if e["event"] == "agent_started"]
         for agent, n in (("preprocess", 2), ("classify", 2), ("extract", 2)):
-            self.assertEqual(actors.count(agent), n)
+            self.assertEqual(done.count(agent), n)
+            self.assertEqual(begun.count(agent), n)
         for agent in ("plan", "kyc", "claims", "policy", "fraud", "decide"):
-            self.assertIn(agent, actors)
+            self.assertIn(agent, done)
+            self.assertIn(agent, begun)
         self.assertTrue(all(e["created_at"] for e in self.events))
+
+    def test_audit_note_says_how_long_each_agent_took_and_what_it_returned(self):
+        self.run_claim(claim=claim(), id=id_card())
+        done = {(e["actor"], e["detail"].get("file_name")): e for e in self.events if e["event"] == "agent_completed"}
+        pre = done[("preprocess", "id.png")]["detail"]["note"]
+        self.assertRegex(pre, r"^preprocess on id\.png took .+ and returned: \d+ characters of text; image clear")
+        cls = done[("classify", "claim.png")]["detail"]["note"]
+        self.assertIn("returned: type CLAIM_FORM at 95% confidence", cls)
+        ext = done[("extract", "claim.png")]["detail"]
+        self.assertIn("claim_amount", ext["fields_extracted"])
+        self.assertIn("field(s) read", ext["note"])
+        decide = next(e for e in self.events if e["actor"] == "decide" and e["event"] == "agent_completed")
+        self.assertIn("returned: APPROVE at", decide["detail"]["note"])
 
     # ---- classification -------------------------------------------------------------------
 
@@ -180,15 +196,45 @@ class ClaimGraphTests(unittest.TestCase):
         self.blurry.add("/tmp/rx.png")
         self.assertEqual(self.decision(self.run_claim(claim=claim(), id=id_card(), rx=rx())), "ESCALATE")
 
-    def test_unclassifiable_page_is_unknown_and_escalates(self):
-        state = self.run_claim(claim=claim(), id=id_card(), other={**rx(), "confidence": 0.3})
+    def test_unclassifiable_page_holds_then_escalates_when_a_person_continues(self):
+        state = self.run_claim(thread="u1", claim=claim(), id=id_card(), other={**rx(), "confidence": 0.3})
         self.assertEqual(state["docs"][2]["doc_type"], "UNKNOWN")
-        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertEqual(state["docs"][2]["classified_as"], "PRESCRIPTION")
+        self.assertIn("__interrupt__", state)
+        self.assertEqual(self.graph.get_state(run_config("u1")).next, ("ingest_hold",))
+        self.assertNotIn("decision", state)                                  # no claim agent ran
+        final = self.graph.invoke(Command(resume={"action": "continue", "note": "ok", "reviewer": "ops1"}),
+                                  config=run_config("u1"))
+        self.assertEqual(self.decision(final), "ESCALATE")
+        self.assertEqual(final["hold"]["action"], "continue")
 
-    def test_unknown_document_alone_escalates_without_running_agents(self):
-        state = self.run_claim(bill=UNKNOWN)
-        self.assertEqual(self.decision(state), "ESCALATE")
+    def test_unknown_document_alone_holds_without_running_agents(self):
+        state = self.run_claim(thread="u2", bill=UNKNOWN)
+        self.assertIn("__interrupt__", state)
+        self.assertEqual(self.graph.get_state(run_config("u2")).tasks[0].interrupts[0].value["pages"][0]["file_name"],
+                         "bill.png")
         self.assertNotIn("kyc", [e["agent"] for e in state["trace"]])
+
+    def test_page_that_cannot_be_read_holds_and_a_person_can_stop(self):
+        def broken(path):
+            raise RuntimeError("LLM call failed after 3 attempt(s): timed out")
+        with mock.patch.object(page_agents, "transcribe", broken):
+            state = self.run_claim(thread="u3", claim=claim(), id=id_card())
+        self.assertTrue(state["docs"][0]["error"].startswith("preprocess failed"))
+        self.assertEqual(self.graph.get_state(run_config("u3")).next, ("ingest_hold",))
+        skipped = [e for e in self.events if e["actor"] == "classify" and e["event"] == "agent_completed"][0]
+        self.assertIn("skipped because an earlier step failed", skipped["detail"]["note"])
+        final = self.graph.invoke(Command(resume={"action": "stop", "reviewer": "ops1"}), config=run_config("u3"))
+        self.assertEqual(final["hold"]["action"], "stop")
+        self.assertNotIn("decision", final)
+        self.assertEqual(self.graph.get_state(run_config("u3")).next, ())
+
+    def test_a_stopped_claim_ends_before_the_next_agent(self):
+        from app.claim import _node
+        _node.set_cancel_check(lambda claim_id: True)
+        self.addCleanup(_node.set_cancel_check, lambda claim_id: False)
+        with self.assertRaises(_node.ClaimCancelled):
+            self.run_claim(thread="s1", claim=claim())
 
     def test_reviewer_type_correction_is_used(self):
         self.pages["/tmp/x.png"] = {**rx(), "doc_type": "UNKNOWN", "_text": "x"}

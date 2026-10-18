@@ -16,6 +16,7 @@ const NAV: Nav[] = [
   { href: "/rejected", label: "Rejected", roles: ["admin", "agent"], icon: "M6 6l12 12M6 18L18 6" },
   { href: "/patients", label: "Patients", roles: ["admin", "agent"], icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" },
   { href: "/audit", label: "Audit log", roles: ["admin"], icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" },
+  { href: "/logs", label: "System logs", roles: ["admin"], icon: "M4 6h16M4 10h16M4 14h10M4 18h7" },
   { href: "/policies", label: "Policies", roles: ["admin"], icon: "M9 12l2 2 4-4M7 4h10a2 2 0 012 2v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" },
 ];
 

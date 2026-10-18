@@ -7,10 +7,13 @@ AGENT_PASSWORD in .env. If unset, a random password is generated and printed onc
 
 from __future__ import annotations
 
+import logging
+
 import os
 import secrets
 
 from app import db
+from app import logdb
 from app.auth import hash_password
 
 ACCOUNTS = [
@@ -19,7 +22,11 @@ ACCOUNTS = [
 ]
 
 
+log = logging.getLogger("medishield.create_users")
+
+
 def main() -> None:
+    logdb.install("create_users")      # logs go to MySQL (app_log)
     db.init_db()
     for username, role, env_key, full_name in ACCOUNTS:
         password = os.getenv(env_key)
@@ -29,6 +36,7 @@ def main() -> None:
         db.upsert_user(username, hash_password(password), role, full_name)
         note = "generated, shown once" if generated else "from .env"
         print(f"{username} ({role}) password {note}: {password if generated else '********'}")
+        log.info(f"{username} ({role}) password {note}")
 
 
 if __name__ == "__main__":

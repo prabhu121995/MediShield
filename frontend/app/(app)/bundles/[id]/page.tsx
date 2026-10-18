@@ -3,8 +3,10 @@ import { notFound } from "next/navigation";
 import AutoRefresh from "@/components/AutoRefresh";
 import Badge from "@/components/Badge";
 import { AgentSummary, AuditEvent, ClaimBundle, ClaimResult, Patient } from "@/lib/api";
-import { claimProgress, Progress, Stage, StageState } from "@/lib/progress";
+import { claimProgress, fmtMs, PageProgress, Progress, Stage, StageState } from "@/lib/progress";
 import { ApiError, serverApi } from "@/lib/server-api";
+import { LONG_STEP_S } from "@/lib/settings";
+import { HoldPanel, ReplacePageButton, StopButton } from "./ClaimControls";
 import ClaimReview from "./ClaimReview";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +27,9 @@ const TONE: Record<string, string> = {
 };
 
 const AGENTS: { key: string; title: string; role: string }[] = [
-  { key: "ingest", title: "Preprocess & classify", role: "Vision model: image → text, then document type, page by page" },
+  { key: "preprocess", title: "Preprocessor agent", role: "Vision model: image → text, image quality, blur score" },
+  { key: "classify", title: "Classifier agent", role: "Vision model: document type, or UNKNOWN below the confidence bar" },
+  { key: "extract", title: "Extractor agent", role: "Text model: that type's fields from the page text" },
   { key: "kyc", title: "KYC agent", role: "Member, ID validity, identity across pages" },
   { key: "claims", title: "Claims agent", role: "Claim form schema and clinical facts" },
   { key: "policy", title: "Policy agent", role: "CPT coverage: retrieved clauses + LLM (RAG)" },
@@ -36,11 +40,18 @@ function pct(v: number | null | undefined) {
   return v == null ? "—" : `${Math.round(v * 100)}%`;
 }
 
+function seconds(from?: string) {
+  return from ? Math.max(0, Math.round((Date.now() - new Date(from).getTime()) / 1000)) : 0;
+}
+
 function elapsed(from?: string) {
   if (!from) return "";
-  const s = Math.max(0, Math.round((Date.now() - new Date(from).getTime()) / 1000));
+  const s = seconds(from);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
+
+// A step running longer than LONG_STEP_S is "in progress": it keeps working in the background.
+const isLong = (s: { state: StageState; startedAt?: string }) => s.state === "running" && seconds(s.startedAt) >= LONG_STEP_S;
 
 const STATE_STYLE: Record<StageState, { chip: string; text: string }> = {
   running: { chip: "bg-sky-100 text-sky-800 ring-sky-600/20", text: "Running" },
@@ -48,14 +59,17 @@ const STATE_STYLE: Record<StageState, { chip: string; text: string }> = {
   error: { chip: "bg-rose-50 text-rose-700 ring-rose-600/20", text: "Error" },
   waiting: { chip: "bg-slate-100 text-slate-500 ring-slate-500/20", text: "Waiting" },
   skipped: { chip: "bg-slate-50 text-slate-400 ring-slate-400/20", text: "Not applicable" },
+  hold: { chip: "bg-orange-100 text-orange-800 ring-orange-600/25", text: "On hold" },
 };
+const LONG_STYLE = { chip: "bg-indigo-50 text-indigo-800 ring-indigo-600/25", text: "In progress · background" };
 
 function StateChip({ stage }: { stage: Stage }) {
-  const st = STATE_STYLE[stage.state];
+  const st = isLong(stage) ? LONG_STYLE : STATE_STYLE[stage.state];
   return (
     <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${st.chip}`}>
       {stage.state === "running" && <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />}
       {st.text}{stage.state === "running" && stage.startedAt ? ` · ${elapsed(stage.startedAt)}` : ""}
+      {(stage.state === "done" || stage.state === "error") && stage.durationMs != null ? ` · ${fmtMs(stage.durationMs)}` : ""}
     </span>
   );
 }
@@ -68,14 +82,16 @@ function Stepper({ progress }: { progress: Progress }) {
         <li key={s.key} className="flex items-center gap-1" aria-current={s.state === "running" ? "step" : undefined}>
           {i > 0 && <span className={`h-px w-4 sm:w-6 ${s.state === "waiting" ? "bg-slate-200" : "bg-slate-400"}`} aria-hidden />}
           <span className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ${
-            s.state === "running" ? "bg-sky-50 text-sky-800 ring-1 ring-sky-300"
+            isLong(s) ? "bg-indigo-50 text-indigo-800 ring-1 ring-indigo-300"
+              : s.state === "running" ? "bg-sky-50 text-sky-800 ring-1 ring-sky-300"
+              : s.state === "hold" ? "bg-orange-50 text-orange-800 ring-1 ring-orange-300"
               : s.state === "done" ? "text-emerald-700" : s.state === "error" ? "text-rose-700" : "text-slate-400"}`}>
             {s.state === "running"
               ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
-              : <span aria-hidden>{s.state === "done" ? "✓" : s.state === "error" ? "✕" : s.state === "skipped" ? "–" : "○"}</span>}
+              : <span aria-hidden>{s.state === "done" ? "✓" : s.state === "error" ? "✕" : s.state === "hold" ? "⏸" : s.state === "skipped" ? "–" : "○"}</span>}
             {s.label}
-            {(s.key === "pages" || s.key === "human_review") && s.state !== "waiting" && <span className="font-normal opacity-75">{s.note}</span>}
-            {s.state === "running" && s.startedAt && <span className="font-normal tabular-nums opacity-75">{elapsed(s.startedAt)}</span>}
+            {["preprocess", "classify", "extract"].includes(s.key) && s.state !== "waiting" && s.state !== "running" && <span className="font-normal opacity-75">{s.note}</span>}
+            {s.state === "running" && s.startedAt && <span className="font-normal tabular-nums opacity-75">{isLong(s) ? "in progress " : ""}{elapsed(s.startedAt)}</span>}
           </span>
         </li>
       ))}
@@ -99,13 +115,48 @@ function AgentCard({ title, role, stage, summary, confidence, children }: {
       </div>
       {finished && confidence != null && <p className="mt-1 text-[11px] tabular-nums text-slate-500">confidence {pct(confidence)}</p>}
       <div className="mt-2 min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1 text-xs">
-        {stage.state === "running" && <p className="text-sky-800">Working on it. This card fills in when the agent finishes.</p>}
+        {stage.state === "running" && (isLong(stage)
+          ? <p className="text-indigo-800">In progress for {elapsed(stage.startedAt)}. It keeps working in the background; you can leave this page.</p>
+          : <p className="text-sky-800">Working on it. This card fills in when the agent finishes.</p>)}
+        {stage.state === "hold" && <p className="text-orange-800">On hold, waiting for a person.</p>}
         {stage.state === "waiting" && <p className="text-slate-400">Waiting for the earlier steps.</p>}
         {stage.state === "skipped" && <p className="text-slate-400">Not applicable to these documents.</p>}
         {finished && summary && <p className={stage.state === "error" ? "text-rose-700" : "text-slate-700"}>{summary}</p>}
         {children}
       </div>
     </div>
+  );
+}
+
+// What one page step returned, one line per page, from that step's audit row.
+function pageLine(step: string, p: PageProgress): string {
+  const st = p.steps[step];
+  const d = st.detail ?? {};
+  if (st.state === "running") return `running · ${elapsed(st.startedAt)}`;
+  if (st.state === "waiting") return "queued";
+  if (d.skipped) return "skipped (earlier step failed)";
+  if (d.error) return `failed: ${String(d.error).slice(0, 80)}`;
+  const t = st.durationMs != null ? ` · ${fmtMs(st.durationMs)}` : "";
+  if (step === "preprocess") return `${Number(d.text_chars ?? 0).toLocaleString()} chars · ${d.image_quality ?? "clear"}${d.is_blurry ? " · blurry" : ""}${t}`;
+  if (step === "classify") return `${String(d.doc_type ?? "").replaceAll("_", " ").toLowerCase()} · ${pct(d.classifier_confidence as number)}${t}`;
+  return `${((d.fields_extracted as string[]) ?? []).length} fields${((d.fields_marked_missing as string[]) ?? []).length ? ` · ${((d.fields_marked_missing as string[])).length} missing` : ""}${t}`;
+}
+
+function PageSteps({ step, progress }: { step: string; progress: Progress }) {
+  return (
+    <ul className="space-y-1 text-[11px] text-slate-600">
+      {progress.pages.map((p) => {
+        const st = p.steps[step];
+        const bad = st.state === "error" || (step === "classify" && p.steps.classify.detail?.doc_type === "UNKNOWN");
+        return (
+          <li key={p.doc_id} className="flex items-center justify-between gap-2">
+            <span className="truncate" title={p.file_name}>{p.file_name}</span>
+            <span title={String(st.detail?.note ?? "")} className={`shrink-0 text-right font-medium ${st.state === "running" ? "text-sky-700"
+              : bad ? "text-rose-700" : st.state === "waiting" ? "text-slate-400" : "text-slate-800"}`}>{pageLine(step, p)}</span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -130,24 +181,21 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
     summary: full ? s[key]?.summary : liveSummary(key),
     confidence: full ? s[key]?.confidence : (st[key].detail?.confidence as number | undefined),
   });
-  return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-      <AgentCard {...AGENTS[0]} stage={st.pages} summary={full ? s.ingest?.summary : undefined} confidence={full ? s.ingest?.confidence : null}>
-        <ul className="space-y-1 text-[11px] text-slate-600">
-          {progress.pages.map((p) => (
-            <li key={p.doc_id} className="flex items-center justify-between gap-2">
-              <span className="truncate" title={p.file_name}>{p.file_name}</span>
-              <span className={`shrink-0 font-medium ${p.state === "running" ? "text-sky-700" : p.doc_type === "UNKNOWN" ? "text-amber-700"
-                : p.state === "waiting" ? "text-slate-400" : "text-slate-800"}`}>
-                {p.state === "running" ? ({ preprocess: "image → text…", classify: "classifying…", extract: "extracting…" } as Record<string, string>)[p.step ?? "preprocess"]
-                  : p.state === "waiting" ? "queued" : (p.doc_type ?? "").replaceAll("_", " ").toLowerCase()}
-                {p.blurry ? " · blurry" : ""}
-              </span>
-            </li>
-          ))}
-        </ul>
+  const pageCard = (i: number) => {
+    const key = AGENTS[i].key;
+    const stage = st[key];
+    return (
+      <AgentCard {...AGENTS[i]} stage={stage} summary={stage.state === "done" || stage.state === "error" ? stage.note : undefined}>
+        <PageSteps step={key} progress={progress} />
       </AgentCard>
-      <AgentCard {...props(1, "kyc")}>
+    );
+  };
+  return (
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {pageCard(0)}
+      {pageCard(1)}
+      {pageCard(2)}
+      <AgentCard {...props(3, "kyc")}>
         {full && kyc?.member && <p className="text-[11px] text-slate-600">Member {kyc.member.member_id} · {kyc.member.full_name}</p>}
         {full && (
           <ul className="space-y-1 text-[11px]">
@@ -159,7 +207,7 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
           </ul>
         )}
       </AgentCard>
-      <AgentCard {...props(2, "claims")}>
+      <AgentCard {...props(4, "claims")}>
         {full && claims?.claim && (
           <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px] text-slate-600">
             <dt>Claim no.</dt><dd className="text-slate-800">{String(fields.claim_number ?? "—")}</dd>
@@ -171,7 +219,7 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
         )}
         {full && (claims?.schema_errors ?? []).map((e) => <p key={e} className="text-[11px] text-rose-700">✕ {e}</p>)}
       </AgentCard>
-      <AgentCard {...props(3, "policy")}>
+      <AgentCard {...props(5, "policy")}>
         {full && policy && !policy.error && (
           <>
             <p className="text-[11px] text-slate-600">{policy.plan ?? "plan unknown"} · CPT {policy.cpt_codes_checked.join(", ")}</p>
@@ -181,7 +229,7 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
           </>
         )}
       </AgentCard>
-      <AgentCard {...props(4, "fraud")}>
+      <AgentCard {...props(6, "fraud")}>
         {full && fraud && !fraud.error && (
           <>
             <div className="h-1.5 overflow-hidden rounded-full bg-slate-100" role="meter" aria-valuenow={fraud.fraud_score} aria-valuemin={0} aria-valuemax={1} aria-label="Fraud score">
@@ -197,32 +245,55 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
   );
 }
 
+const AGENT_ACTORS = ["preprocess", "classify", "extract", "ingest_hold", "plan", "kyc", "claims", "policy", "fraud",
+  "decide", "human_review", "orchestrator", "system"];
+
+function auditText(e: AuditEvent): string {
+  const d = e.detail ?? {};
+  if (e.event === "agent_started") return `started${d.file_name ? ` on ${d.file_name}` : ""}`;
+  if (d.note && e.event === "agent_completed") return String(d.note);
+  if (Array.isArray(d.reasons) && e.event === "claim_on_hold") return `${d.note ?? ""} ${(d.reasons as string[]).join("; ")}`;
+  return (d.justification ?? d.error ?? d.note ?? (d.decision ? `${d.from ? `${d.from} → ` : ""}${d.decision}` : null)
+    ?? (d.to ? `${d.file_name}: ${d.from} → ${d.to}` : null)
+    ?? (e.event === "document_replaced" ? `${d.from} → ${d.file_name}` : null)
+    ?? (Array.isArray(d.files) ? `${(d.files as string[]).join(", ")}` : null)
+    ?? (d.documents !== undefined ? `${d.documents} document(s)` : "")) as string;
+}
+
 function AuditLog({ events }: { events: AuditEvent[] }) {
   return (
     <section className="card p-5" aria-labelledby="audit-h">
       <div className="flex items-baseline justify-between">
-        <h2 id="audit-h" className="text-sm font-semibold text-slate-900">Audit log</h2>
+        <h2 id="audit-h" className="text-sm font-semibold text-slate-900">Audit log · investigation notes</h2>
         <span className="text-xs text-slate-400">{events.length} events · UTC timestamps</span>
       </div>
+      <p className="mt-1 text-xs text-slate-500">Each agent row says what it worked on, how long it took and what it returned. Open a row for the full returned values.</p>
       <ol className="mt-4 space-y-0">
         {events.map((e) => {
           const d = e.detail ?? {};
-          const text = (d.justification ?? d.error ?? d.note ?? (d.decision ? `${d.from ? `${d.from} → ` : ""}${d.decision}` : null)
-            ?? (d.doc_type ? `${d.file_name}: ${d.doc_type}` : null) ?? (d.to ? `${d.file_name}: ${d.from} → ${d.to}` : null)
-            ?? (Array.isArray(d.tags) ? `score ${d.fraud_score} ${(d.tags as string[]).join(", ")}` : null)
-            ?? (d.kyc_passed !== undefined ? `kyc_passed=${d.kyc_passed} ${((d.flags as string[]) ?? []).join(", ")}` : null)
-            ?? (d.covered !== undefined ? `covered=${d.covered}` : null)
-            ?? (d.schema_valid !== undefined ? `schema_valid=${d.schema_valid}` : null)
-            ?? (d.agents ? `agents: ${(d.agents as string[]).join(", ")}` : null)
-            ?? (d.documents !== undefined ? `${d.documents} document(s)` : "")) as string;
-          const human = !["ingest", "plan", "kyc", "claims", "policy", "fraud", "decide", "orchestrator", "system"].includes(e.actor);
+          const human = !AGENT_ACTORS.includes(e.actor);
+          const started = e.event === "agent_started";
+          const returned = Object.fromEntries(Object.entries(d).filter(([k]) => k !== "note"));
+          const long = (e.duration_ms ?? 0) >= LONG_STEP_S * 1000;
           return (
-            <li key={e.id} className="grid grid-cols-[88px_120px_1fr] gap-3 border-l-2 border-slate-100 py-1.5 pl-3 text-xs sm:grid-cols-[96px_150px_1fr]">
+            <li key={e.id} className={`grid grid-cols-[88px_130px_1fr] gap-3 border-l-2 py-1.5 pl-3 text-xs sm:grid-cols-[96px_170px_1fr] ${
+              e.status === "error" ? "border-rose-300" : e.event === "claim_on_hold" ? "border-orange-300" : "border-slate-100"}`}>
               <time className="tabular-nums text-slate-400" dateTime={e.created_at}>{fmtTime(e.created_at)}</time>
-              <span className={`truncate font-medium ${e.status === "error" ? "text-rose-700" : human ? "text-brand-700" : "text-slate-800"}`}>
-                {e.actor}{e.duration_ms != null ? <span className="font-normal text-slate-400"> · {e.duration_ms} ms</span> : null}
+              <span className={`truncate font-medium ${e.status === "error" ? "text-rose-700" : human ? "text-brand-700" : started ? "text-slate-500" : "text-slate-800"}`}>
+                {e.actor}
+                {e.duration_ms != null && (
+                  <span className={`font-normal ${long ? "text-indigo-700" : "text-slate-400"}`}> · took {fmtMs(e.duration_ms)}</span>
+                )}
               </span>
-              <span className="min-w-0 break-words text-slate-600"><span className="text-slate-400">{e.event.replaceAll("_", " ")}</span> {text}</span>
+              <span className="min-w-0 break-words text-slate-600">
+                <span className="text-slate-400">{e.event.replaceAll("_", " ")}</span>{" "}
+                {e.event === "agent_completed" && Object.keys(returned).length > 0 ? (
+                  <details className="inline">
+                    <summary className="inline cursor-pointer list-none">{auditText(e)} <span className="text-brand-700">▸ returned</span></summary>
+                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-[10px] text-slate-700">{JSON.stringify(returned, null, 2)}</pre>
+                  </details>
+                ) : auditText(e)}
+              </span>
             </li>
           );
         })}
@@ -252,8 +323,13 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
   const ov = claim.override;
   const shown = claim.decision ?? out?.decision ?? null;
   const awaitingHuman = status === "NEEDS_REVIEW" && !!result.awaiting_human;
-  const progress = claimProgress(audit, claim.documents, running, awaitingHuman, status === "REVIEWED");
+  const onHold = status === "ON_HOLD";
+  const progress = claimProgress(audit, claim.documents, running, awaitingHuman || (onHold && result.awaiting === "human_review"),
+                                 status === "REVIEWED", onHold);
   const current = progress.stages.filter((s) => s.state === "running");
+  const lastStart = audit.map((e) => e.event).lastIndexOf("claim_started");
+  const stopping = running && audit.slice(Math.max(0, lastStart)).some((e) => e.event === "stop_requested");
+  const longStep = current.find(isLong);
 
   return (
     <div className="space-y-6">
@@ -284,12 +360,19 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
             <p className="flex items-center gap-2 text-sm font-semibold">
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
               {current.length === 0
-                ? (status === "QUEUED" ? "Waiting in the queue behind earlier claims" : "Starting…")
-                : current.map((s) => s.key === "pages"
-                  ? `${progress.pages.find((p) => p.state === "running")?.file_name ?? "page"}: ${s.note}`
-                  : `${s.label} agent running`).join(" · ")}
+                ? (status === "QUEUED" ? "Pending: waiting to start" : "Starting…")
+                : current.map((s) => ["preprocess", "classify", "extract"].includes(s.key)
+                  ? `${s.label} agent: ${s.note} · ${elapsed(s.startedAt)}`
+                  : `${s.label} agent running · ${elapsed(s.startedAt)}`).join(" · ")}
             </p>
-            <p className="mt-0.5 text-xs">Pages are read one at a time, then KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. This page updates every few seconds.</p>
+            {longStep ? (
+              <p className="mt-0.5 text-xs font-medium text-indigo-900">
+                In progress: the {longStep.label.toLowerCase()} step has run over {LONG_STEP_S}s. It keeps working in the background; you can leave this page. Only one claim runs at a time, so new uploads wait until it finishes.
+              </p>
+            ) : (
+              <p className="mt-0.5 text-xs">Each page goes through preprocess → classify → extract, one page at a time. If every page is read, KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. If a page fails or is unknown, the claim goes on hold for a person. This page updates every few seconds.</p>
+            )}
+            <div className="mt-2"><StopButton claimId={claim.bundle_id} stopping={stopping} /></div>
           </div>
         )}
         {result.error && (
@@ -311,14 +394,23 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
         )}
       </div>
 
+      {onHold && result.hold && (
+        <HoldPanel claimId={claim.bundle_id} hold={result.hold} waitingAtHold={result.awaiting === "ingest_hold"} />
+      )}
+      {status === "STOPPED" && (
+        <div className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-800" role="status">
+          <p className="text-sm font-semibold">Stopped by a person</p>
+          <p className="mt-0.5 text-xs">No further agents run. Re-run it or re-upload pages from Human review to start again.</p>
+        </div>
+      )}
       {awaitingHuman && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900" role="status">
           <p className="text-sm font-semibold">Paused for human review</p>
           <p className="mt-0.5 text-xs">The run is stopped at the human_review checkpoint (LangGraph interrupt). Recording a decision below resumes it from exactly this point.</p>
         </div>
       )}
-      {(running || out) && <Stepper progress={progress} />}
-      {(running || out) && <Detail result={result} progress={progress} />}
+      {(running || out || onHold || status === "STOPPED") && <Stepper progress={progress} />}
+      {(running || out || onHold || status === "STOPPED") && <Detail result={result} progress={progress} />}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="space-y-6">
@@ -335,7 +427,12 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
                   <span className="flex min-w-0 flex-col text-xs">
                     <span className="truncate font-semibold text-slate-900" title={d.file_name}>{d.file_name}</span>
                     <span className="capitalize text-slate-500">{d.doc_type?.replaceAll("_", " ").toLowerCase() ?? "not read yet"}</span>
-                    <span className="mt-auto"><Badge value={d.status} /></span>
+                    <span className="mt-auto flex flex-wrap items-center gap-2">
+                      <Badge value={d.status} />
+                      {!running && (d.doc_type === "UNKNOWN" || d.status === "UNREADABLE") && (
+                        <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name} />
+                      )}
+                    </span>
                   </span>
                 </li>
               ))}

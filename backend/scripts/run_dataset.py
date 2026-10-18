@@ -20,6 +20,8 @@ Writes storage/dataset_run/claims.csv, documents.csv and scorecard.md.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import csv
 import json
@@ -32,12 +34,16 @@ from pathlib import Path
 import httpx
 
 from app import config, db
+from app import logdb
 
 ORDER = {"APPROVE": 0, "REJECT": 1, "ESCALATE": 2}
 DOC_TYPE_BY_CATEGORY = {"claim_forms": "CLAIM_FORM", "id_documents": "ID_DOCUMENT",
                         "discharge_summaries": "DISCHARGE_SUMMARY", "prescriptions": "PRESCRIPTION",
                         "policy_amendments": "POLICY_AMENDMENT", "unknown": "UNKNOWN"}
 OUT_DIR = config.STORAGE_DIR / "dataset_run"
+
+
+log = logging.getLogger("medishield.run_dataset")
 
 
 def expected_for_doc(m: dict) -> tuple[str, str]:
@@ -163,6 +169,7 @@ def scorecard(rows: list[dict], doc_rows: list[dict]) -> str:
 
 
 def main() -> None:
+    logdb.install("run_dataset")      # logs go to MySQL (app_log)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--api", default=config.API_URL)
     ap.add_argument("--user", default="admin")
@@ -179,13 +186,13 @@ def main() -> None:
     claims = build_claims(meta, set(args.clusters) if args.clusters else None)
     if not args.keep_history:
         db.clear_claim_history()
-        print("cleared stored claim history")
+        log.info("cleared stored claim history")
 
     with httpx.Client(base_url=args.api, timeout=60) as client:
         login(client, args.user, args.password)
         for c in claims:                                        # queue everything; one worker runs them in order
             c["bundle_id"] = submit(client, c)
-            print(f"queued {c['key']:28} {len(c['docs'])} page(s) -> {c['bundle_id']}")
+            log.info(f"queued {c['key']:28} {len(c['docs'])} page(s) -> {c['bundle_id']}")
         rows, doc_rows = [], []
         for c in claims:
             body = wait(client, c["bundle_id"], args.timeout)
@@ -206,7 +213,7 @@ def main() -> None:
                 doc_rows.append({"claim": c["key"], "doc_id": m["doc_id"], "expected_type": exp_type,
                                  "predicted_type": d.get("doc_type"), "match": d.get("doc_type") == exp_type})
             mark = "ok " if rows[-1]["match"] else "MISS"
-            print(f"{mark} {c['key']:28} expected {c['expected']:8} got {predicted:8} "
+            log.info(f"{mark} {c['key']:28} expected {c['expected']:8} got {predicted:8} "
                   f"{rows[-1]['justification'][:110]}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -217,7 +224,7 @@ def main() -> None:
             w.writerows(data)
     (OUT_DIR / "scorecard.md").write_text(scorecard(rows, doc_rows), encoding="utf-8")
     correct = sum(r["match"] for r in rows)
-    print(f"\nclaim decisions {correct}/{len(rows)} correct; report: {OUT_DIR / 'scorecard.md'}")
+    log.info(f"claim decisions {correct}/{len(rows)} correct; report: {OUT_DIR / 'scorecard.md'}")
 
 
 if __name__ == "__main__":

@@ -27,10 +27,11 @@ async function proxy(req: NextRequest, { params }: Ctx) {
   if (!upstream) {
     return NextResponse.json({ detail: "server unavailable" }, { status: 503 });
   }
-  return new NextResponse(upstream.body, {
-    status: upstream.status,
-    headers: { "Content-Type": upstream.headers.get("content-type") ?? "application/json" },
-  });
+  // Downloads (CSV, PDF) keep their file name.
+  const out = new Headers({ "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
+  const disposition = upstream.headers.get("content-disposition");
+  if (disposition) out.set("Content-Disposition", disposition);
+  return new NextResponse(upstream.body, { status: upstream.status, headers: out });
 }
 
 export { proxy as GET, proxy as POST };

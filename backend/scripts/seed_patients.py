@@ -12,13 +12,19 @@ Create one patient per patient in dataset/metadata.json.
 
 from __future__ import annotations
 
+import logging
+
 import json
 import uuid
 from typing import Any
 
 from app import config, db
+from app import logdb
 
 SEED_USER = "seed"
+
+
+log = logging.getLogger("medishield.seed_patients")
 
 
 def plan_patients(documents: list[dict[str, Any]], members: dict[str, dict],
@@ -52,6 +58,7 @@ def plan_patients(documents: list[dict[str, Any]], members: dict[str, dict],
 
 
 def main() -> None:
+    logdb.install("seed_patients")      # logs go to MySQL (app_log)
     db.init_db()
     documents = json.loads((config.DATASET_DIR / "metadata.json").read_text(encoding="utf-8"))
     members = {m["member_id"]: m for m in db._fetch(
@@ -63,10 +70,10 @@ def main() -> None:
     for patient in create:
         db.insert_patient(str(uuid.uuid4()), patient, created_by=SEED_USER)
 
-    print(f"created {len(create)} patients, skipped {len(skipped)} already registered, "
+    log.info(f"created {len(create)} patients, skipped {len(skipped)} already registered, "
           f"{len(missing)} with no member record")
     if missing:
-        print("no member record (run scripts.seed_members first):", ", ".join(missing))
+        log.info("no member record (run scripts.seed_members first): " + ", ".join(missing))
 
 
 if __name__ == "__main__":

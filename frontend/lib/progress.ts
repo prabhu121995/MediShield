@@ -1,16 +1,25 @@
-// Live progress of a claim, derived from its audit log. Every agent writes an
-// "agent_completed" row when it finishes, so the rows since the latest "claim_started"
-// tell which agents are done, which one is running, and which are still waiting.
+// Live progress of a claim, derived from its audit log. Every agent writes an "agent_started"
+// row when it begins and an "agent_completed" row when it ends, so the rows since the latest
+// "claim_started" tell which agents are done, which one is running (and since when), and
+// which are still waiting.
 import type { AuditEvent, CaseSummary } from "./api";
 
-export type StageState = "waiting" | "running" | "done" | "error" | "skipped";
+export type StageState = "waiting" | "running" | "done" | "error" | "skipped" | "hold";
 
 export interface Stage {
   key: string;
   label: string;
   state: StageState;
   note: string;
-  startedAt?: string;          // when the running stage began (end of the previous step)
+  startedAt?: string;          // when the running stage began
+  durationMs?: number;         // total time the stage took (all pages for a page stage)
+  detail?: Record<string, unknown>;
+}
+
+export interface PageStep {
+  state: StageState;
+  startedAt?: string;
+  durationMs?: number;
   detail?: Record<string, unknown>;
 }
 
@@ -21,6 +30,7 @@ export interface PageProgress {
   step?: string;               // the step running on this page: preprocess | classify | extract
   doc_type?: string;
   blurry?: boolean;
+  steps: Record<string, PageStep>;
 }
 
 export interface Progress {
@@ -30,65 +40,104 @@ export interface Progress {
   pages: PageProgress[];
 }
 
+export const PAGE_STEPS = ["preprocess", "classify", "extract"] as const;
 const LABELS: Record<string, string> = {
-  pages: "Preprocess · classify · extract", plan: "Plan", kyc: "KYC", claims: "Claims", policy: "Policy",
-  fraud: "Fraud", decide: "Decision", human_review: "Human review",
+  preprocess: "Preprocess", classify: "Classify", extract: "Extract", ingest_hold: "Hold (person)",
+  plan: "Plan", kyc: "KYC", claims: "Claims", policy: "Policy", fraud: "Fraud", decide: "Decision",
+  human_review: "Human review",
 };
-const PAGE_STEPS = ["preprocess", "classify", "extract"] as const;
-const STEP_LABEL: Record<string, string> = { preprocess: "image → text", classify: "classifying", extract: "extracting fields" };
 
 export function claimProgress(events: AuditEvent[], documents: CaseSummary[], running: boolean, awaitingHuman = false,
-                              reviewed = false): Progress {
+                              reviewed = false, onHold = false): Progress {
   const start = events.map((e) => e.event).lastIndexOf("claim_started");
   const run = start >= 0 ? events.slice(start) : [];
-  const done = (agent: string) => run.filter((e) => e.event === "agent_completed" && e.actor === agent);
-  const last = (agent: string) => done(agent).at(-1);
+  const completed = (agent: string, doc?: string) =>
+    run.filter((e) => e.event === "agent_completed" && e.actor === agent && (doc === undefined || e.doc_id === doc));
+  const begun = (agent: string, doc?: string) =>
+    run.filter((e) => e.event === "agent_started" && e.actor === agent && (doc === undefined || e.doc_id === doc));
   const lastTime = run.at(-1)?.created_at;
 
-  // Each page passes preprocess -> classify -> extract, one page at a time, in upload order.
-  let runningAssigned = false;
+  // ---- pages: each passes preprocess -> classify -> extract, one page at a time ----
   const pages: PageProgress[] = documents.map((d) => {
-    const steps = run.filter((e) => e.event === "agent_completed" && e.doc_id === d.case_id);
-    const extracted = steps.find((e) => e.actor === "extract");
-    const typed = steps.find((e) => e.actor === "classify") ?? extracted;
-    const failed = steps.some((e) => e.status === "error") || Boolean(extracted?.detail?.error);
-    const read = steps.find((e) => e.actor === "preprocess");
-    if (extracted) {
-      return { doc_id: d.case_id, file_name: d.file_name, state: failed ? "error" : "done",
-               doc_type: (typed?.detail?.doc_type ?? extracted.detail?.doc_type) as string,
-               blurry: Boolean(read?.detail?.is_blurry || typed?.detail?.is_blurry) };
+    const steps: Record<string, PageStep> = {};
+    for (const s of PAGE_STEPS) {
+      const done = completed(s, d.case_id).at(-1);
+      const go = begun(s, d.case_id).at(-1);
+      if (done) steps[s] = { state: done.status === "error" ? "error" : "done", durationMs: done.duration_ms ?? 0, detail: done.detail };
+      else if (go && running) steps[s] = { state: "running", startedAt: go.created_at };
+      else steps[s] = { state: "waiting" };
     }
-    if (running && start >= 0 && !runningAssigned) {
-      runningAssigned = true;
-      const next = PAGE_STEPS.find((s) => !steps.some((e) => e.actor === s)) ?? "extract";
-      return { doc_id: d.case_id, file_name: d.file_name, state: "running", step: next,
-               doc_type: typed?.detail?.doc_type as string | undefined };
-    }
-    return { doc_id: d.case_id, file_name: d.file_name, state: "waiting" };
+    const runningStep = PAGE_STEPS.find((s) => steps[s].state === "running");
+    const extracted = steps.extract.state === "done" || steps.extract.state === "error";
+    const docType = (steps.classify.detail?.doc_type ?? steps.extract.detail?.doc_type) as string | undefined;
+    const failed = PAGE_STEPS.some((s) => steps[s].state === "error");
+    return {
+      doc_id: d.case_id, file_name: d.file_name, steps, doc_type: docType,
+      state: extracted ? (failed ? "error" : "done") : runningStep ? "running" : "waiting",
+      step: runningStep,
+      blurry: Boolean(steps.preprocess.detail?.is_blurry || steps.classify.detail?.is_blurry),
+    };
   });
 
-  const planned = (last("plan")?.detail?.agents as string[] | undefined) ?? null;
-  const hasClaimForm = pages.some((p) => p.doc_type === "CLAIM_FORM");
+  // Older runs have no agent_started rows: the first unfinished page is the running one.
+  if (running && start >= 0 && !pages.some((p) => p.state === "running") && !run.some((e) => e.event === "agent_started")) {
+    const p = pages.find((x) => x.state === "waiting");
+    if (p) {
+      p.state = "running";
+      p.step = PAGE_STEPS.find((s) => p.steps[s].state === "waiting");
+      if (p.step) p.steps[p.step] = { state: "running", startedAt: lastTime };
+    }
+  }
+
+  const pageStage = (key: (typeof PAGE_STEPS)[number]): Stage => {
+    const n = pages.length;
+    const finished = pages.filter((p) => ["done", "error"].includes(p.steps[key].state)).length;
+    const errors = pages.filter((p) => p.steps[key].state === "error").length;
+    const live = pages.find((p) => p.steps[key].state === "running");
+    const durationMs = pages.reduce((sum, p) => sum + (p.steps[key].durationMs ?? 0), 0);
+    if (n > 0 && finished === n) {
+      return { key, label: LABELS[key], state: errors ? "error" : "done", durationMs,
+               note: errors ? `${finished}/${n} pages · ${errors} failed` : `${finished}/${n} pages` };
+    }
+    if (live) {
+      return { key, label: LABELS[key], state: "running", startedAt: live.steps[key].startedAt, durationMs,
+               note: `page ${pages.indexOf(live) + 1} of ${n} · ${live.file_name}` };
+    }
+    return { key, label: LABELS[key], state: "waiting", durationMs, note: finished ? `${finished}/${n} pages` : "waiting" };
+  };
+
+  const pre = pageStage("preprocess");
+  const cls = pageStage("classify");
+  const ext = pageStage("extract");
   const allRead = pages.length > 0 && pages.every((p) => p.state === "done" || p.state === "error");
+
+  // ---- the hold after page reading (only when a page failed or is UNKNOWN) ----
+  const holdDone = completed("ingest_hold").at(-1);
+  const heldAt = run.filter((e) => e.event === "claim_on_hold" && e.detail?.stage === "ingest").at(-1);
+  const hold: Stage | null = holdDone
+    ? { key: "ingest_hold", label: LABELS.ingest_hold, state: "done", note: `person chose ${holdDone.detail?.action}`, detail: holdDone.detail }
+    : heldAt && onHold
+      ? { key: "ingest_hold", label: LABELS.ingest_hold, state: "hold", note: "waiting for a person: continue, stop or re-upload", startedAt: heldAt.created_at, detail: heldAt.detail }
+      : null;
+
+  // ---- the claim agents ----
+  const planned = (completed("plan").at(-1)?.detail?.agents as string[] | undefined) ?? null;
+  const hasClaimForm = pages.some((p) => p.doc_type === "CLAIM_FORM");
   const finished = (s: Stage) => ["done", "error", "skipped"].includes(s.state);
+  const blocked = Boolean(hold && hold.state === "hold") || (holdDone?.detail?.action === "stop");
 
   const stage = (key: string, ready: boolean, applies: boolean | null): Stage => {
-    const e = last(key);
-    if (e) return { key, label: LABELS[key], state: e.status === "error" ? "error" : "done", note: `${e.duration_ms ?? 0} ms`, detail: e.detail };
+    const e = completed(key).at(-1);
+    if (e) return { key, label: LABELS[key], state: e.status === "error" ? "error" : "done", note: fmtMs(e.duration_ms ?? 0),
+                    durationMs: e.duration_ms ?? 0, detail: e.detail };
+    if (blocked) return { key, label: LABELS[key], state: "waiting", note: "on hold" };
     if (applies === false) return { key, label: LABELS[key], state: "skipped", note: "not applicable" };
-    if (running && ready) return { key, label: LABELS[key], state: "running", note: "running…", startedAt: lastTime };
+    const go = begun(key).at(-1);
+    if (running && (go || ready)) return { key, label: LABELS[key], state: "running", note: "running…", startedAt: go?.created_at ?? lastTime };
     return { key, label: LABELS[key], state: "waiting", note: "waiting" };
   };
 
-  const readCount = pages.filter((p) => p.state === "done" || p.state === "error").length;
-  const current = pages.find((p) => p.state === "running");
-  const pagesStage: Stage = allRead
-    ? { key: "pages", label: LABELS.pages, state: "done", note: `${readCount}/${pages.length} pages` }
-    : { key: "pages", label: LABELS.pages, state: running && start >= 0 ? "running" : "waiting",
-        note: `page ${Math.min(readCount + 1, pages.length)} of ${pages.length}${current?.step ? ` · ${STEP_LABEL[current.step]}` : ""}`,
-        startedAt: lastTime };
-
-  const plan = stage("plan", allRead, null);
+  const plan = stage("plan", allRead && (!heldAt || Boolean(holdDone)), null);
   const planDone = plan.state === "done";
   const kyc = stage("kyc", planDone, planned ? planned.includes("kyc") : null);
   const claims = stage("claims", planDone, planned ? planned.includes("claims") : null);
@@ -96,15 +145,22 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
   const fraud = stage("fraud", planDone && [kyc, claims, policy].every(finished), planned ? planned.length > 0 : null);
   const decide = stage("decide", planDone && finished(fraud), null);
 
-  const decided = last("decide")?.detail?.decision as string | undefined;
-  const reviewDone = last("human_review");
+  const decided = completed("decide").at(-1)?.detail?.decision as string | undefined;
+  const reviewDone = completed("human_review").at(-1);
   const human: Stage = reviewDone || reviewed
     ? { key: "human_review", label: LABELS.human_review, state: "done", note: String(reviewDone?.detail?.decision ?? "decided"), detail: reviewDone?.detail }
     : awaitingHuman || decided === "ESCALATE"
-      ? { key: "human_review", label: LABELS.human_review, state: "running", note: "paused at checkpoint, waiting for a person", startedAt: last("decide")?.created_at }
+      ? { key: "human_review", label: LABELS.human_review, state: "hold", note: "paused at checkpoint, waiting for a person", startedAt: completed("decide").at(-1)?.created_at }
       : decided ? { key: "human_review", label: LABELS.human_review, state: "skipped", note: "not needed" }
         : { key: "human_review", label: LABELS.human_review, state: "waiting", note: "only if escalated" };
 
-  const stages = [pagesStage, plan, kyc, claims, policy, fraud, decide, human];
+  const stages = [pre, cls, ext, ...(hold ? [hold] : []), plan, kyc, claims, policy, fraud, decide, human];
   return { running, current: stages.find((s) => s.state === "running") ?? null, stages, pages };
+}
+
+export function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  return `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s`;
 }

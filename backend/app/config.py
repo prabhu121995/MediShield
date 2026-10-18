@@ -130,6 +130,14 @@ AGENT_CONFIDENCE_MIN = env_float("AGENT_CONFIDENCE_MIN")
 FRAUD_ESCALATE_MIN = env_float("FRAUD_ESCALATE_MIN")
 BLUR_VARIANCE_MIN = env_float("BLUR_VARIANCE_MIN")
 
+# ---- logs (MySQL table app_log) ---------------------------------------------------
+LOG_LEVEL = env_str("LOG_LEVEL")
+LOG_BATCH_SIZE = env_int("LOG_BATCH_SIZE")
+LOG_FLUSH_S = env_float("LOG_FLUSH_S")
+LOG_EXPORT_MAX_ROWS = env_int("LOG_EXPORT_MAX_ROWS")
+LOG_STATS_SCAN_MAX = env_int("LOG_STATS_SCAN_MAX")
+LOG_TOP_N = env_int("LOG_TOP_N")
+
 # ---- scripts ----------------------------------------------------------------------
 API_URL = env_str("API_URL")
 DATASET_RUN_TIMEOUT_S = env_int("DATASET_RUN_TIMEOUT_S")

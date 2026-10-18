@@ -12,10 +12,16 @@ record when the ID prints none. Reads are cached, so this is fast after warm_vis
 
 from __future__ import annotations
 
+import logging
+
 import json
 
 from app import config, db
+from app import logdb
 from app.claim.vision import extract, transcribe
+
+
+log = logging.getLogger("medishield.seed_members")
 
 
 def plan_of(policy: str) -> str | None:
@@ -28,6 +34,7 @@ def _fields(path, doc_type: str) -> dict:
 
 
 def main() -> None:
+    logdb.install("seed_members")      # logs go to MySQL (app_log)
     db.init_db()
     entries = json.loads((config.DATASET_DIR / "metadata.json").read_text(encoding="utf-8"))
     patients = {}
@@ -40,7 +47,7 @@ def main() -> None:
         amend = _fields(config.DATASET_DIR / "policy_amendments" / f"amend_{pid}.png", "POLICY_AMENDMENT")
         name = id_fields.get("patient_name") or amend.get("patient_name")
         if not name:
-            print(f"skip {pid}: no readable name")
+            log.info(f"skip {pid}: no readable name")
             continue
         dob = id_fields.get("date_of_birth") or amend.get("date_of_birth")
         db._execute(
@@ -54,7 +61,7 @@ def main() -> None:
             "ON DUPLICATE KEY UPDATE id_type=VALUES(id_type), id_expiry_date=VALUES(id_expiry_date)",
             (pid, id_fields.get("id_kind") or "ID_DOCUMENT", id_fields.get("id_expiry_date"), "ACTIVE"),
         )
-        print(f"seeded {pid}: {name} dob={dob} expiry={id_fields.get('id_expiry_date')} policy={policy}", flush=True)
+        log.info(f"seeded {pid}: {name} dob={dob} expiry={id_fields.get('id_expiry_date')} policy={policy}")
 
 
 if __name__ == "__main__":

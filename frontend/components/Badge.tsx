@@ -10,6 +10,9 @@ const STYLES: Record<string, string> = {
   INGESTED: "bg-slate-100 text-slate-600 ring-slate-500/20",
   PROCESSING: "bg-sky-50 text-sky-700 ring-sky-600/20",
   FAILED: "bg-rose-50 text-rose-700 ring-rose-600/20",
+  ON_HOLD: "bg-orange-50 text-orange-800 ring-orange-600/25",
+  STOPPED: "bg-slate-100 text-slate-600 ring-slate-500/25",
+  UNREADABLE: "bg-rose-50 text-rose-700 ring-rose-600/20",
 };
 
 const LABELS: Record<string, string> = {
@@ -17,16 +20,19 @@ const LABELS: Record<string, string> = {
   ESCALATE: "Escalate",
   APPROVE: "Approve",
   REJECT: "Reject",
-  PROCESSING: "Processing",
-  QUEUED: "Queued",
+  PROCESSING: "In progress",
+  QUEUED: "Pending",
   REVIEWED: "Reviewed",
   FAILED: "Failed",
+  ON_HOLD: "On hold",
+  STOPPED: "Stopped",
+  UNREADABLE: "Unreadable",
 };
 
 export default function Badge({ value }: { value: string | null | undefined }) {
   if (!value) return <span className="text-slate-400">—</span>;
   const style = STYLES[value] ?? "bg-slate-100 text-slate-600 ring-slate-500/20";
-  const pulse = value === "ESCALATE" || value === "NEEDS_REVIEW";
+  const pulse = value === "ESCALATE" || value === "NEEDS_REVIEW" || value === "ON_HOLD";
   const spin = value === "PROCESSING";
   return (
     <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset transition-colors duration-300 ${style}`}>

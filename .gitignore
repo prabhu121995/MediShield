@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -15,18 +14,27 @@ build/
 dist/
 *.egg-info/
 
-# Environment
+# Environment (secrets). The .env.example files are committed.
 .env
-
-# local data generated
-dataset/*
-
-# Next js env
 frontend/.env.local
 frontend/.env*local
-frontend/node_modules/*
 
-frontend/node_modules/*
+# Local data generated
+dataset/*
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+
+# Runtime storage. Records, logs, audit, checkpoints and model caches live in MySQL;
+# only uploaded scans, policy PDFs, the Qdrant vector store and evaluation reports are files.
+backend/storage/uploads/*
+backend/storage/policies/*
+backend/storage/qdrant/
+backend/storage/dataset_run/
+
+# Logs are written to MySQL (table app_log); never commit a stray log file
+*.log
 
 # IDE
 .vscode/
@@ -34,20 +42,3 @@ frontend/node_modules/*
 
 # OS
 .DS_Store
-EOF
-
-backend/storage/qdrant/.lock
-
-# Cache
-.cache/*
-
-# JWT secret
-backend/storage/jwt_secret.key
-
-# Runtime storage (keep folders via .gitkeep if needed)
-backend/storage/ocr_cache/*
-backend/storage/uploads/*
-backend/storage/vision_cache/*
-
-# Next.js build output
-frontend/.next/

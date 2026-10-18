@@ -8,14 +8,21 @@ Resumable: pages already cached for this model and rule set are skipped.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import time
 
 from app import config
+from app import logdb
 from app.claim.vision import classify, extract, transcribe
 
 
+log = logging.getLogger("medishield.warm_vision")
+
+
 def main() -> None:
+    logdb.install("warm_vision")      # logs go to MySQL (app_log)
     ap = argparse.ArgumentParser()
     ap.add_argument("--folders", nargs="*", help="dataset sub-folders to read (default: all)")
     args = ap.parse_args()
@@ -32,8 +39,8 @@ def main() -> None:
             note = f"{kind['doc_type']:18} conf={kind['confidence']:.2f} quality={text['image_quality']} chars={len(text['text'])}"
         except Exception as exc:                  # a bad page or a model error: report and move on
             note = f"FAILED {type(exc).__name__}: {exc}"
-        print(f"[{i:3}/{len(images)}] {path.name:36} {time.perf_counter() - t:6.1f}s {note}", flush=True)
-    print(f"done: {len(images)} pages in {time.perf_counter() - t0:.0f}s ({config.VISION_MODEL_NAME})")
+        log.info(f"[{i:3}/{len(images)}] {path.name:36} {time.perf_counter() - t:6.1f}s {note}")
+    log.info(f"done: {len(images)} pages in {time.perf_counter() - t0:.0f}s ({config.VISION_MODEL_NAME})")
 
 
 if __name__ == "__main__":

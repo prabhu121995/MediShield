@@ -143,9 +143,11 @@ class CreateBundleTests(unittest.TestCase):
         fake_db.cases_for_bundles.side_effect = lambda ids: {i: [c for c in self.cases if c["bundle_id"] == i] for i in ids}
         fake_db.get_patient.side_effect = lambda pid: self.patients.get(pid)
 
+        self.active: dict | None = None                     # the claim processing now, if any
         self.patches = [
             mock.patch("app.main.db", fake_db),
             mock.patch("app.main.claims_service.submit_claim", side_effect=submit),
+            mock.patch("app.main.claims_service.active_claim", side_effect=lambda exclude=None: self.active),
             mock.patch.object(config, "UPLOAD_DIR", pathlib.Path(self.tmp.name)),
         ]
         for p in self.patches:
@@ -211,6 +213,15 @@ class CreateBundleTests(unittest.TestCase):
         self.assertEqual(self.enqueued, [])
         self.assertEqual(list(pathlib.Path(self.tmp.name).iterdir()), [])
 
+    def test_only_one_claim_runs_at_a_time(self):
+        self.active = {"bundle_id": "b9", "title": "C_001 · PT_19116", "status": "PROCESSING"}
+        res = self.post([("claim.png", png_bytes())])
+        self.assertEqual(res.status_code, 409, res.text)
+        self.assertIn("only one claim runs at a time", res.json()["detail"])
+        self.assertEqual(self.bundles, {})
+        self.assertEqual(list(pathlib.Path(self.tmp.name).iterdir()), [])     # nothing stored
+        self.assertEqual(self.client.get("/api/claim-bundles/active").json()["active"]["bundle_id"], "b9")
+
     def test_too_many_pages_is_refused_before_creating_the_case(self):
         with mock.patch("app.main.MAX_BUNDLE_DOCUMENTS", 2):
             res = self.post([("a.png", png_bytes()), ("b.pdf", pdf_bytes(2))])
@@ -249,7 +260,7 @@ class CreateBundleTests(unittest.TestCase):
         main.db.list_bundles.side_effect = lambda **kw: []
         main.db.cases_for_bundles.side_effect = lambda ids: {}
         for name, expected in (("approved", {"decision": "APPROVE"}), ("rejected", {"decision": "REJECT"}),
-                               ("review", {"status": "NEEDS_REVIEW", "oldest_first": True})):
+                               ("review", {"status": ("NEEDS_REVIEW", "ON_HOLD"), "oldest_first": True})):
             self.assertEqual(self.client.get(f"/api/queues/{name}").status_code, 200)
             kwargs = main.db.list_bundles.call_args.kwargs
             self.assertEqual({k: kwargs[k] for k in expected}, expected)

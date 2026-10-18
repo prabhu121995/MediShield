@@ -30,6 +30,7 @@ class IngestedDoc(TypedDict, total=False):
     doc_type: str               # CLAIM_FORM | ID_DOCUMENT | ... | UNKNOWN
     classifier_confidence: float
     classifier_source: str      # vision | human_override
+    classified_as: str          # what the model said, before the confidence threshold
     fields: dict[str, Any]      # identity and date fields read from the page
     error: str
 
@@ -60,6 +61,7 @@ class ClaimState(TypedDict, total=False):
     policy: dict[str, Any]
     fraud: dict[str, Any]
     decision: dict[str, Any]
+    hold: dict[str, Any]                                # the person's choice when page reading was incomplete
     review: dict[str, Any]                              # the human decision for an escalated claim
 
     trace: Annotated[list[TraceEvent], operator.add]

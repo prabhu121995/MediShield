@@ -18,7 +18,7 @@ import time
 from app import audit, config
 from app.blur import laplacian_variance
 from app.claim import vision
-from app.claim._node import emit
+from app.claim._node import check_cancelled, emit, started
 from app.claim.state import ClaimState
 
 # Isolated so tests can replace them.
@@ -36,21 +36,24 @@ def _current(state: ClaimState) -> dict:
 
 
 def _step(state: ClaimState, agent: str, work) -> dict:
-    """Run one page step with timing, a trace event and an audit row."""
+    """Run one page step with timing, a trace event and audit rows (started, completed)."""
+    check_cancelled(state)
     doc = _current(state)
-    page = dict(state.get("page") or {}) if (state.get("page") or {}).get("doc_id") == doc["doc_id"] else \
-        {"doc_id": doc["doc_id"], "file_name": doc.get("file_name", "")}
-    started, t0 = audit.now(), time.perf_counter()
+    page = dict(state.get("page") or {}) if (state.get("page") or {}).get("doc_id") == doc["doc_id"] else         {"doc_id": doc["doc_id"], "file_name": doc.get("file_name", "")}
+    started(state, agent, doc_id=doc["doc_id"], file_name=page.get("file_name"))
+    started_at, t0 = audit.now(), time.perf_counter()
     if page.get("error"):
-        result = page                                   # an earlier step failed: pass the page through
+        result, own = page, {"skipped": True}           # an earlier step failed: pass the page through
     else:
         try:
-            result = {**page, **work(doc, page)}
+            own = work(doc, page)
+            result = {**page, **own}
         except Exception as exc:
+            own = {}
             result = {**page, "doc_type": "UNKNOWN", "classifier_confidence": 0.0, "fields": {},
                       "fields_marked_missing": [], "read_confidence": 0.0,
                       "error": f"{agent} failed: {type(exc).__name__}: {exc}"}
-    event = emit(state, agent, started, t0, result, doc_id=doc["doc_id"])
+    event = emit(state, agent, started_at, t0, result, doc_id=doc["doc_id"], returned=own)
     event["note"] = event["note"] or f"{result.get('file_name')}"
     return {"page": result, "trace": [event], "status": agent.upper()}, result
 
@@ -61,7 +64,7 @@ def preprocess_agent(state: ClaimState) -> dict:
         read = transcribe(doc["file_path"])
         variance = blur_of(doc["file_path"])
         blurry = variance < th["blur_variance_min"] or read["image_quality"] != "clear"
-        return {"raw_text": read["text"], "image_quality": read["image_quality"],
+        return {"raw_text": read["text"], "text_chars": len(read["text"]), "image_quality": read["image_quality"],
                 "blur_variance": round(variance, 2), "is_blurry": blurry, "model": read["model"],
                 "read_confidence": 0.0 if read["image_quality"] == "unreadable"
                 else th["blurry_page_confidence"] if blurry else 0.9}
@@ -82,15 +85,17 @@ def classify_agent(state: ClaimState) -> dict:
         if out["image_quality"] != "clear" and not page.get("is_blurry"):
             extra = {"is_blurry": True, "read_confidence": min(page.get("read_confidence", 0.9),
                                                                config.RULES["thresholds"]["blurry_page_confidence"])}
-        return {"doc_type": doc_type, "classifier_confidence": round(out["confidence"], 3),
-                "classifier_source": "vision", **extra}
+        return {"doc_type": doc_type, "classified_as": out["doc_type"],
+                "classifier_confidence": round(out["confidence"], 3), "classifier_source": "vision", **extra}
     update, _ = _step(state, "classify", work)
     return update
 
 
 def extract_agent(state: ClaimState) -> dict:
     def work(doc, page):
-        return extract(page.get("raw_text") or "", page.get("doc_type") or "UNKNOWN")
+        out = extract(page.get("raw_text") or "", page.get("doc_type") or "UNKNOWN")
+        return {**out, "fields_extracted": sorted(k for k, v in (out.get("fields") or {}).items()
+                                                  if v not in (None, "", [], {}))}
     update, result = _step(state, "extract", work)
     result.setdefault("fields", {})
     result.setdefault("fields_marked_missing", [])

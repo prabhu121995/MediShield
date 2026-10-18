@@ -150,6 +150,19 @@ SCHEMA = [
         task_path     VARCHAR(255) NOT NULL DEFAULT '',
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
     )""",
+    # Application logs (app.logdb): API, uvicorn and scripts write here instead of log files.
+    """CREATE TABLE IF NOT EXISTS app_log (
+        id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+        created_at DATETIME(3) NOT NULL,
+        level      VARCHAR(10) NOT NULL,
+        logger     VARCHAR(128) NOT NULL,
+        source     VARCHAR(48) NOT NULL,
+        message    MEDIUMTEXT NOT NULL,
+        exc_text   MEDIUMTEXT NULL,
+        INDEX ix_log_time (created_at),
+        INDEX ix_log_level (level, id),
+        INDEX ix_log_source (source, id)
+    )""",
     # Model outputs per page (transcription, document type, fields), keyed by input + model + prompt.
     """CREATE TABLE IF NOT EXISTS model_cache (
         cache_key  CHAR(80) PRIMARY KEY,
@@ -448,12 +461,15 @@ def get_bundle(bundle_id: str, with_result: bool = True) -> dict | None:
     return _bundle_row(rows[0]) if rows else None
 
 
-def list_bundles(limit: int = 200, status: str | None = None, decision: str | None = None,
+def list_bundles(limit: int = 200, status: str | tuple[str, ...] | None = None, decision: str | None = None,
                  oldest_first: bool = False) -> list[dict]:
     """Claims, newest first, with the queue fields read straight from the stored result
-    (justification, reasons, fraud score) so a list never loads full agent outputs."""
+    (justification, reasons, fraud score) so a list never loads full agent outputs.
+    `status` is one status or a tuple of them."""
     clauses, args = [], []
-    if status:
+    if isinstance(status, (tuple, list)):
+        clauses.append(f"status IN ({', '.join(['%s'] * len(status))})"); args.extend(status)
+    elif status:
         clauses.append("status=%s"); args.append(status)
     if decision:
         clauses.append("decision=%s"); args.append(decision)
@@ -518,7 +534,19 @@ def bundle_documents(bundle_id: str) -> list[dict]:
 
 
 def review_queue_count() -> int:
-    return int(_fetch("SELECT COUNT(*) AS n FROM claim_bundle WHERE status='NEEDS_REVIEW'")[0]["n"])
+    return int(_fetch("SELECT COUNT(*) AS n FROM claim_bundle WHERE status IN ('NEEDS_REVIEW','ON_HOLD')")[0]["n"])
+
+
+def replace_case_file(case_id: str, file_name: str, result: dict) -> None:
+    """A re-uploaded page: new file, nothing read from it yet, no type correction."""
+    _execute("UPDATE case_record SET file_name=%s, doc_type=NULL, status='QUEUED', decision=NULL, "
+             "confidence=NULL, needs_review=0, result=%s, override=NULL WHERE case_id=%s",
+             (file_name, json.dumps(result, default=str), case_id))
+
+
+def delete_bundle_documents(bundle_id: str) -> None:
+    """Remove a claim's pages before every page is re-uploaded (the audit log keeps the old names)."""
+    _execute("DELETE FROM case_record WHERE bundle_id=%s", (bundle_id,))
 
 
 # ---- audit log -----------------------------------------------------------------------
@@ -551,9 +579,12 @@ def list_audit_events(claim_id: str) -> list[dict]:
 
 
 def search_audit_events(entity_type: str | None = None, entity_id: str | None = None, actor: str | None = None,
-                        limit: int = 200) -> list[dict]:
+                        limit: int = 200, since=None) -> list[dict]:
     """The audit log across every entity, newest first."""
     clauses, args = [], []
+    if since:
+        clauses.append("created_at >= %s")
+        args.append(since)
     for col, value in (("entity_type", entity_type), ("entity_id", entity_id), ("actor", actor)):
         if value:
             clauses.append(f"{col}=%s")
@@ -612,6 +643,50 @@ def save_checkpoint_writes(thread_id: str, ns: str, checkpoint_id: str,
 def delete_checkpoint_thread(thread_id: str) -> None:
     for table in ("lg_checkpoint", "lg_checkpoint_blob", "lg_checkpoint_write"):
         _execute(f"DELETE FROM {table} WHERE thread_id=%s", (thread_id,))
+
+
+# ---- application logs ------------------------------------------------------------------
+
+def insert_logs(rows: list[dict]) -> None:
+    conn = _connect(config.MYSQL_DB)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany("INSERT INTO app_log (created_at, level, logger, source, message, exc_text) "
+                            "VALUES (%s,%s,%s,%s,%s,%s)",
+                            [(r["created_at"], r["level"], r["logger"], r["source"], r["message"], r.get("exc_text"))
+                             for r in rows])
+    finally:
+        conn.close()
+
+
+def search_logs(level: str | None = None, source: str | None = None, q: str | None = None,
+                limit: int = 200, since=None) -> list[dict]:
+    clauses, args = [], []
+    if since:
+        clauses.append("created_at >= %s")
+        args.append(since)
+    if level:
+        if level == "ERROR":
+            clauses.append("level IN ('ERROR','CRITICAL')")
+        else:
+            clauses.append("level=%s")
+            args.append(level)
+    if source:
+        clauses.append("source=%s")
+        args.append(source)
+    if q:
+        clauses.append("message LIKE %s")
+        args.append(f"%{q}%")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = _fetch(f"SELECT id, created_at, level, logger, source, message, exc_text FROM app_log {where} "
+                  "ORDER BY id DESC LIMIT %s", (*args, limit))
+    for r in rows:
+        r["created_at"] = r["created_at"].isoformat(timespec="milliseconds") + "Z"
+    return rows
+
+
+def log_sources() -> list[str]:
+    return [r["source"] for r in _fetch("SELECT DISTINCT source FROM app_log ORDER BY source")]
 
 
 # ---- model output cache ---------------------------------------------------------------

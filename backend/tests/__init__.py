@@ -2,3 +2,10 @@
 from app import audit
 
 audit.set_sink(lambda event: None)
+
+# ...nor log rows: install() sees a handler already in place and does nothing.
+import logging
+
+from app import logdb
+
+logdb._handler = logging.NullHandler()
