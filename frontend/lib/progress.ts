@@ -27,7 +27,7 @@ export interface PageProgress {
   doc_id: string;
   file_name: string;
   state: StageState;
-  step?: string;               // the step running on this page: preprocess | classify | extract
+  step?: string;               // the step running on this page: classify | extract (preprocess + extract)
   doc_type?: string;
   blurry?: boolean;
   steps: Record<string, PageStep>;
@@ -40,9 +40,9 @@ export interface Progress {
   pages: PageProgress[];
 }
 
-export const PAGE_STEPS = ["preprocess", "classify", "extract"] as const;
+export const PAGE_STEPS = ["classify", "extract"] as const;
 const LABELS: Record<string, string> = {
-  preprocess: "Preprocess", classify: "Classify", extract: "Extract", ingest_hold: "Hold (person)",
+  classify: "Classify", extract: "Preprocess + extract", ingest_hold: "Hold (person)",
   plan: "Plan", kyc: "KYC", claims: "Claims", policy: "Policy", fraud: "Fraud", decide: "Decision",
   human_review: "Human review",
 };
@@ -57,7 +57,7 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
     run.filter((e) => e.event === "agent_started" && e.actor === agent && (doc === undefined || e.doc_id === doc));
   const lastTime = run.at(-1)?.created_at;
 
-  // ---- pages: each passes preprocess -> classify -> extract, one page at a time ----
+  // ---- pages: every page is classified first, then each is preprocessed + extracted ----
   const pages: PageProgress[] = documents.map((d) => {
     const steps: Record<string, PageStep> = {};
     for (const s of PAGE_STEPS) {
@@ -75,7 +75,7 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
       doc_id: d.case_id, file_name: d.file_name, steps, doc_type: docType,
       state: extracted ? (failed ? "error" : "done") : runningStep ? "running" : "waiting",
       step: runningStep,
-      blurry: Boolean(steps.preprocess.detail?.is_blurry || steps.classify.detail?.is_blurry),
+      blurry: Boolean(steps.classify.detail?.is_blurry),
     };
   });
 
@@ -106,12 +106,11 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
     return { key, label: LABELS[key], state: "waiting", durationMs, note: finished ? `${finished}/${n} pages` : "waiting" };
   };
 
-  const pre = pageStage("preprocess");
   const cls = pageStage("classify");
   const ext = pageStage("extract");
   const allRead = pages.length > 0 && pages.every((p) => p.state === "done" || p.state === "error");
 
-  // ---- the hold after page reading (only when a page failed or is UNKNOWN) ----
+  // ---- the hold (a page UNKNOWN, blurry or failed after classify, or unreadable after extract) ----
   const holdDone = completed("ingest_hold").at(-1);
   const heldAt = run.filter((e) => e.event === "claim_on_hold" && e.detail?.stage === "ingest").at(-1);
   const hold: Stage | null = holdDone
@@ -154,7 +153,10 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
       : decided ? { key: "human_review", label: LABELS.human_review, state: "skipped", note: "not needed" }
         : { key: "human_review", label: LABELS.human_review, state: "waiting", note: "only if escalated" };
 
-  const stages = [pre, cls, ext, ...(hold ? [hold] : []), plan, kyc, claims, policy, fraud, decide, human];
+  const heldAfterClassify = (hold?.detail?.step ?? heldAt?.detail?.step) !== "extract";
+  const stages = heldAfterClassify
+    ? [cls, ...(hold ? [hold] : []), ext, plan, kyc, claims, policy, fraud, decide, human]
+    : [cls, ext, ...(hold ? [hold] : []), plan, kyc, claims, policy, fraud, decide, human];
   return { running, current: stages.find((s) => s.state === "running") ?? null, stages, pages };
 }
 

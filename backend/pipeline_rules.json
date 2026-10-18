@@ -52,7 +52,19 @@
 
   "plans_by_policy_prefix": {"MED-GLD-": "GOLD", "MED-SLV-": "SILVER"},
 
+  "_page_order": "Pages are classified, then read (preprocess + extract), in this order of document type. Before classification the type comes from the type chosen at upload, else from a filename_hints word in the file name; pages with no hint are classified last. Reading uses the classified type, UNKNOWN last. Ties keep upload order.",
+  "page_order": ["ID_DOCUMENT", "CLAIM_FORM", "DISCHARGE_SUMMARY", "PRESCRIPTION", "POLICY_AMENDMENT"],
+  "patient_ref_pattern": "PT_\\d+",
+  "filename_hints": {
+    "ID_DOCUMENT": ["id", "license", "licence", "passport", "card", "aadhaar"],
+    "CLAIM_FORM": ["claim", "cms1500", "ub04", "bill"],
+    "DISCHARGE_SUMMARY": ["discharge"],
+    "PRESCRIPTION": ["rx", "prescription", "presc"],
+    "POLICY_AMENDMENT": ["amend", "amendment", "endorsement", "rider"]
+  },
+
   "required_documents": ["CLAIM_FORM", "ID_DOCUMENT"],
+  "upload_required_documents": ["CLAIM_FORM", "ID_DOCUMENT", "DISCHARGE_SUMMARY", "PRESCRIPTION", "POLICY_AMENDMENT"],
   "medical_documents": ["CLAIM_FORM", "DISCHARGE_SUMMARY", "PRESCRIPTION"],
   "treatment_date_sources": [["CLAIM_FORM", "service_date"], ["DISCHARGE_SUMMARY", "admission_date"], ["PRESCRIPTION", "prescription_date"]],
 
@@ -67,10 +79,9 @@
   "confidence_weights": {"ingest": 0.15, "kyc": 0.25, "claims": 0.20, "policy": 0.20, "fraud": 0.20},
 
   "kyc": {
-    "_about": "KYC only checks that the claimant's name is a member, and that an insurance card does not say it is invalid. Every other identity check is a fraud tag.",
+    "_about": "KYC's main check: the claimant's name is a member (no -> reject). An insurance card that is not valid (expired before the treatment date, prints an expired status, or is marked not valid) sends the claim to human review. Every other identity check is a fraud tag.",
     "insurance_card_keywords": ["insurance", "member", "medicare", "health plan"],
-    "card_invalid_phrases": ["CARD EXPIRED", "EXPIRED CARD", "NOT VALID", "INVALID"],
-    "ignore_phrases": ["NOT VALID FOR FEDERAL PURPOSES"]
+    "card_expired_phrases": ["CARD EXPIRED", "EXPIRED CARD", "EXPIRED"]
   },
 
   "fraud": {
@@ -82,7 +93,8 @@
     "proc_diag_mismatch": {"severity": 0.5, "procedure_ranges": [[59000, 59899]], "required_diagnosis_prefixes": ["O"]},
     "name_mismatch": {"severity": 0.7},
     "readmission_30d": {"severity": 0.7, "days": 30},
-    "date_conflict": {"severity": 0.6, "days": 45}
+    "date_conflict": {"severity": 0.6, "days": 45},
+    "missing_field": {"severity": 0.4}
   },
 
   "policy": {

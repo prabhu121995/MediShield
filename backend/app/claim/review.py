@@ -40,4 +40,4 @@ def human_review_agent(state: ClaimState) -> dict:
               "reviewer": (answer or {}).get("reviewer") or "unknown",
               "reviewed_at": audit.now(), "original_decision": out.get("decision")}
     event = emit(state, "human_review", started, t0, {"decision": decision, "justification": review["note"]})
-    return {"review": review, "trace": [event], "status": "REVIEWED"}
+    return {"review": review, "trace": [event], "status": {"APPROVE": "APPROVED", "REJECT": "REJECTED"}.get(decision, "NEEDS_REVIEW")}

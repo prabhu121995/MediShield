@@ -2,12 +2,17 @@
 LangGraph wiring for one claim (all documents uploaded together).
 
     START
-      -> preprocess -> classify -> extract      (one page per pass; loops until every page is read)
-      -> ingest_hold                            only when a page failed or is UNKNOWN: interrupt(),
-                                                the claim is ON_HOLD until a person continues or stops
+      -> classify                               pass 1, one page per step; loops until every page
+                                                is classified (type, image quality, blur)
+      -> ingest_hold                            when a page is UNKNOWN, blurry or failed: interrupt(),
+                                                the claim is ON_HOLD before any page is read, until
+                                                a person continues, stops or re-uploads
+      -> extract                                pass 2, preprocess + extract in one step per page
+                                                (text, then fields); loops until every page is read
+      -> ingest_hold                            only if a page could not be read and no person has
+                                                looked at this run yet
       -> plan                                   (orchestrator: which agents apply)
-           -> kyc ................................\
-           -> claims -> policy (claim form only) ---> fraud (deferred) -> decide (deferred)
+           -> kyc ................................           -> claims -> policy (claim form only) ---> fraud (deferred) -> decide (deferred)
       plan -> decide directly when no page could be routed
       decide -> human_review (ESCALATE only)    interrupt(): the run pauses at a checkpoint
                                                 until a person resumes it with their decision
@@ -27,9 +32,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.claim.agents import (
     claims_agent, classify_agent, decide_agent, extract_agent, fraud_agent, human_review_agent,
-    kyc_agent, plan_agent, policy_agent, preprocess_agent,
+    kyc_agent, plan_agent, policy_agent,
 )
-from app.claim.hold import ingest_hold_agent, problem_pages
+from app.claim.hold import classify_problems, ingest_hold_agent, read_problems
 from app.claim.state import ClaimState
 
 
@@ -38,14 +43,24 @@ def _failed(state: ClaimState, key: str) -> bool:
     return isinstance(out, dict) and "error" in out
 
 
+def route_after_classify(state: ClaimState) -> str:
+    if len(state.get("classified") or []) < len(state.get("documents") or []):
+        return "classify"
+    return "ingest_hold" if classify_problems(state.get("classified") or []) else "extract"
+
+
 def route_after_extract(state: ClaimState) -> str:
     if len(state.get("docs") or []) < len(state.get("documents") or []):
-        return "preprocess"
-    return "ingest_hold" if problem_pages(state.get("docs") or []) else "plan"
+        return "extract"
+    if read_problems(state.get("docs") or []) and not state.get("hold"):
+        return "ingest_hold"
+    return "plan"
 
 
 def route_after_hold(state: ClaimState) -> str:
-    return "plan" if (state.get("hold") or {}).get("action") == "continue" else END
+    if (state.get("hold") or {}).get("action") != "continue":
+        return END
+    return "plan" if len(state.get("docs") or []) >= len(state.get("documents") or []) else "extract"
 
 
 def route_after_plan(state: ClaimState):
@@ -65,7 +80,6 @@ def route_after_decide(state: ClaimState) -> str:
 
 def build_claim_graph(checkpointer=None):
     g = StateGraph(ClaimState)
-    g.add_node("preprocess", preprocess_agent)
     g.add_node("classify", classify_agent)
     g.add_node("extract", extract_agent)
     g.add_node("ingest_hold", ingest_hold_agent)
@@ -77,11 +91,10 @@ def build_claim_graph(checkpointer=None):
     g.add_node("decide", decide_agent, defer=True)
     g.add_node("human_review", human_review_agent)
 
-    g.add_edge(START, "preprocess")
-    g.add_edge("preprocess", "classify")
-    g.add_edge("classify", "extract")
-    g.add_conditional_edges("extract", route_after_extract, ["preprocess", "ingest_hold", "plan"])
-    g.add_conditional_edges("ingest_hold", route_after_hold, ["plan", END])
+    g.add_edge(START, "classify")
+    g.add_conditional_edges("classify", route_after_classify, ["classify", "ingest_hold", "extract"])
+    g.add_conditional_edges("extract", route_after_extract, ["extract", "ingest_hold", "plan"])
+    g.add_conditional_edges("ingest_hold", route_after_hold, ["extract", "plan", END])
     g.add_conditional_edges("plan", route_after_plan, ["kyc", "claims", "decide"])
     g.add_conditional_edges("claims", route_after_claims, ["policy", "fraud"])
     g.add_edge("kyc", "fraud")

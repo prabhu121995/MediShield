@@ -1,8 +1,8 @@
 """
 Graph state for one claim: every document uploaded together, processed as one case.
 
-Each agent writes exactly one key. `docs` and `trace` are append-only, so the ingest loop
-adds one document per pass and the parallel branches (kyc || claims -> policy) never
+Each agent writes exactly one key. `classified`, `docs` and `trace` are append-only, so each
+page pass (classify, then extract) adds one page per step and the parallel branches (kyc || claims -> policy) never
 overwrite each other's output.
 """
 
@@ -22,7 +22,7 @@ class DocumentIn(TypedDict, total=False):
 class IngestedDoc(TypedDict, total=False):
     doc_id: str
     file_name: str
-    raw_text: str               # the preprocessor's transcription (vision model)
+    raw_text: str               # the transcription (vision model), read in the extract step
     image_quality: str          # clear | blurry | unreadable
     read_confidence: float
     blur_variance: float
@@ -53,8 +53,9 @@ class ClaimState(TypedDict, total=False):
     received_at: str
     documents: list[DocumentIn]                         # the queue, in upload order
 
-    page: Annotated[dict[str, Any], _last_wins]         # the page being read (preprocess -> classify -> extract)
-    docs: Annotated[list[IngestedDoc], operator.add]    # one entry per finished page
+    page: Annotated[dict[str, Any], _last_wins]         # unused; kept so older checkpoints still load
+    classified: Annotated[list[IngestedDoc], operator.add]  # pass 1: one entry per classified page
+    docs: Annotated[list[IngestedDoc], operator.add]    # pass 2: one entry per read (preprocessed + extracted) page
     plan: dict[str, Any]
     kyc: dict[str, Any]
     claims: dict[str, Any]

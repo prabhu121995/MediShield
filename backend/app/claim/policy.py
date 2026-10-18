@@ -24,7 +24,7 @@ def member_plan(policy_number: str | None, repo) -> str | None:
     return (member or {}).get("plan")
 
 
-def decide(codes: list[str], plan: str | None, store, rules: dict | None = None) -> dict:
+def decide(codes: list[str], plan: str | None, store, rules: dict | None = None, brief: dict | None = None) -> dict:
     rules = (rules or config.RULES)["policy"]
     if not codes:
         raise ValueError("the claim form lists no CPT codes to check")
@@ -42,8 +42,16 @@ def decide(codes: list[str], plan: str | None, store, rules: dict | None = None)
         hits = [h for h in hits if plan.lower() in h["source"].lower()] or hits
     clauses = list(dict.fromkeys(f"[{h['source']}] {h['text'][:MAX_CLAUSE_CHARS]}" for h in hits))
 
+    b = brief or {}
+    details = [f"{label}: {value}" for label, value in (
+        ("Diagnoses (ICD-10)", ", ".join(b.get("icd10_codes") or [])), ("Billed amount", b.get("claim_amount")),
+        ("Service date", b.get("service_date")), ("Admission", b.get("admission_date")),
+        ("Discharge", b.get("discharge_date")), ("Medications", ", ".join(b.get("medications") or [])),
+        ("Clinical documents", ", ".join(b.get("clinical_documents") or []))) if value]
     user = ("Procedure codes on the claim: " + ", ".join(codes)
-            + (f"\nMember plan: {plan}" if plan else "") + "\n\nPolicy clauses:\n" + "\n---\n".join(clauses))
+            + (f"\nMember plan: {plan}" if plan else "")
+            + ("\nClaim details from the claims agent:\n" + "\n".join(details) if details else "")
+            + "\n\nPolicy clauses:\n" + "\n---\n".join(clauses))
     raw = chat_json(SYSTEM_PROMPT, user)
     confidence = 0.9 if min(best) >= rules["min_retrieval_score"] else 0.5
     decision = PolicyDecision(**{k: raw.get(k) for k in ("covered", "coverage_percentage", "policy_clause", "exclusions")
@@ -56,7 +64,8 @@ def decide(codes: list[str], plan: str | None, store, rules: dict | None = None)
 
 @claim_node("policy", writes="policy")
 def policy_agent(state: ClaimState) -> dict:
-    claim = (state.get("claims") or {}).get("claim") or {}
-    fields = claim.get("extracted_fields") or {}
-    codes = [c["code"] for c in fields.get("cpt_codes") or []]
-    return decide(codes, member_plan(fields.get("policy_number"), get_repository()), get_policy_store())
+    claims = state.get("claims") or {}
+    fields = (claims.get("claim") or {}).get("extracted_fields") or {}
+    brief = claims.get("policy_brief") or {}
+    codes = brief.get("cpt_codes") or [c["code"] for c in fields.get("cpt_codes") or []]
+    return decide(codes, member_plan(fields.get("policy_number"), get_repository()), get_policy_store(), brief=brief)

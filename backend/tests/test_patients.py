@@ -49,11 +49,11 @@ class FakeDb:
     def get_patient(self, patient_id):
         return self.patients.get(patient_id)
 
-    def list_patients(self, search=None, limit=200):
+    def list_patients(self, search=None, limit=200, offset=0):
         rows = list(self.patients.values())
         if search:
             rows = [r for r in rows if search.lower() in r["full_name"].lower()]
-        return rows
+        return rows[offset:offset + limit]
 
     def list_cases(self, decision=None, status=None, patient_id=None, limit=200):
         return [c for c in self.cases.values() if patient_id is None or c.get("patient_id") == patient_id]

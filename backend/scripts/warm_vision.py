@@ -1,5 +1,5 @@
 """
-Preprocess, classify and extract every dataset page once, so later runs hit the cache.
+Classify, then preprocess + extract, every dataset page once, so later runs hit the cache.
 Resumable: pages already cached for this model and rule set are skipped.
 
     cd backend && ../.venv/Scripts/python.exe -m scripts.warm_vision                # every page
@@ -33,9 +33,9 @@ def main() -> None:
     for i, path in enumerate(images, start=1):
         t = time.perf_counter()
         try:
-            text = transcribe(str(path))                  # preprocess
             kind = classify(str(path))                    # classify
-            extract(text["text"], kind["doc_type"])       # extract
+            text = transcribe(str(path))                  # preprocess + extract
+            extract(text["text"], kind["doc_type"])
             note = f"{kind['doc_type']:18} conf={kind['confidence']:.2f} quality={text['image_quality']} chars={len(text['text'])}"
         except Exception as exc:                  # a bad page or a model error: report and move on
             note = f"FAILED {type(exc).__name__}: {exc}"

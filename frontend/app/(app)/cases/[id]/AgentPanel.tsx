@@ -59,7 +59,7 @@ function Body({ item, trace }: { item: AgentItem; trace: TraceItem[] }) {
     if (trace.length === 0) return <p className="text-sm text-slate-400">No trace recorded.</p>;
     return (
       <ol className="relative space-y-4 border-l border-slate-200 pl-6">
-        {trace.map((t, i) => (
+        {[...trace].reverse().map((t, i) => (               // newest first
           <li key={i}>
             <span className={`absolute -left-[5px] mt-1.5 h-2.5 w-2.5 rounded-full ring-4 ring-white ${t.status === "ok" ? "bg-emerald-500" : "bg-rose-500"}`} />
             <div className="flex items-center justify-between gap-4">

@@ -10,6 +10,7 @@ patient and case_record.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Any, Protocol
 
@@ -317,7 +318,15 @@ class MySQLRepository:
                       (member_id, exclude_case or ""))
 
 
+def _npi(value: Any) -> str | None:
+    """An NPI is exactly 10 digits; anything else the model read (a name, two numbers) is not stored."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits if len(digits) == 10 else None
+
+
 def save_claim(case_id: str, data: dict) -> None:
+    data = {**data, "provider_npi": _npi(data.get("provider_npi")),
+            "patient_name": (data.get("patient_name") or "")[:120] or None}
     _execute(
         "INSERT INTO claim (case_id, member_id, patient_name, service_date, claim_amount, "
         "icd10_codes, cpt_codes, provider_npi) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
@@ -400,24 +409,30 @@ def list_cases(limit: int = 200, decision: str | None = None,
 
 
 def dashboard_stats() -> dict:
-    """Aggregates for the dashboard KPI cards. One query, so the numbers agree with each other."""
+    """Aggregates for the dashboard KPI cards, counted per claim (a claim holds several pages).
+    One query, so the numbers agree with each other."""
     row = _fetch(
         "SELECT COUNT(*) AS total, "
         "COALESCE(SUM(DATE(created_at)=CURDATE()), 0) AS today, "
-        "COALESCE(SUM(status='PROCESSING'), 0) AS processing, "
+        "COALESCE(SUM(status IN ('QUEUED','PROCESSING')), 0) AS processing, "
         "COALESCE(SUM(status='FAILED'), 0) AS failed, "
         "COALESCE(SUM(decision='APPROVE'), 0) AS approved, "
         "COALESCE(SUM(decision='REJECT'), 0) AS rejected, "
-        "COALESCE(SUM(decision='ESCALATE'), 0) AS escalated, "
-        "COALESCE(SUM(status='REVIEWED'), 0) AS reviewed, "
+        "COALESCE(SUM(status IN ('NEEDS_REVIEW','ON_HOLD')), 0) AS escalated, "
+        "COALESCE(SUM(decision='ESCALATE'), 0) AS undecided, "
+        "COALESCE(SUM(override IS NOT NULL), 0) AS reviewed, "
         "AVG(confidence) AS avg_confidence "
-        "FROM case_record"
+        "FROM claim_bundle"
     )[0]
+    pages = _fetch("SELECT COUNT(*) AS n, COALESCE(SUM(DATE(created_at)=CURDATE()), 0) AS today "
+                   "FROM case_record WHERE bundle_id IS NOT NULL")[0]
     patients = _fetch("SELECT COUNT(*) AS n FROM patient")[0]["n"]
-    decided = int(row["approved"]) + int(row["rejected"]) + int(row["escalated"])
+    decided = int(row["approved"]) + int(row["rejected"]) + int(row["undecided"])
     return {
         "total": int(row["total"]),
+        "documents": int(pages["n"]),
         "today": int(row["today"]),
+        "documents_today": int(pages["today"]),
         "processing": int(row["processing"]),
         "failed": int(row["failed"]),
         "approved": int(row["approved"]),
@@ -462,11 +477,16 @@ def get_bundle(bundle_id: str, with_result: bool = True) -> dict | None:
 
 
 def list_bundles(limit: int = 200, status: str | tuple[str, ...] | None = None, decision: str | None = None,
-                 oldest_first: bool = False) -> list[dict]:
+                 oldest_first: bool = False, q: str | None = None, offset: int = 0) -> list[dict]:
     """Claims, newest first, with the queue fields read straight from the stored result
     (justification, reasons, fraud score) so a list never loads full agent outputs.
-    `status` is one status or a tuple of them."""
+    `status` is one status or a tuple of them; `q` searches the title, id and patient name;
+    `offset` skips that many rows (pagination)."""
     clauses, args = [], []
+    if q:
+        clauses.append("(title LIKE %s OR bundle_id LIKE %s OR patient_id IN "
+                       "(SELECT patient_id FROM patient WHERE full_name LIKE %s))")
+        args.extend([f"%{q}%", f"{q}%", f"%{q}%"])
     if isinstance(status, (tuple, list)):
         clauses.append(f"status IN ({', '.join(['%s'] * len(status))})"); args.extend(status)
     elif status:
@@ -479,8 +499,8 @@ def list_bundles(limit: int = 200, status: str | tuple[str, ...] | None = None, 
         "JSON_UNQUOTE(JSON_EXTRACT(result, '$.decision.justification')) AS justification, "
         "JSON_EXTRACT(result, '$.decision.reasons') AS reasons, "
         "JSON_EXTRACT(result, '$.fraud.fraud_score') AS fraud_score "
-        f"FROM claim_bundle {where} ORDER BY created_at {'ASC' if oldest_first else 'DESC'} LIMIT %s",
-        (*args, limit))
+        f"FROM claim_bundle {where} ORDER BY created_at {'ASC' if oldest_first else 'DESC'} LIMIT %s OFFSET %s",
+        (*args, limit, max(0, offset)))
     for r in rows:
         r["reasons"] = json.loads(r["reasons"]) if r.get("reasons") else []
         r["fraud_score"] = float(r["fraud_score"]) if r.get("fraud_score") not in (None, "null") else None
@@ -533,6 +553,19 @@ def bundle_documents(bundle_id: str) -> list[dict]:
     return [_case_row(r) for r in rows]
 
 
+def count_bundles(status: str | tuple[str, ...] | None = None, decision: str | None = None, **_ignored) -> int:
+    """How many claims list_bundles() would return for these filters (extra list options ignored)."""
+    clauses, args = [], []
+    if isinstance(status, (tuple, list)):
+        clauses.append(f"status IN ({', '.join(['%s'] * len(status))})"); args.extend(status)
+    elif status:
+        clauses.append("status=%s"); args.append(status)
+    if decision:
+        clauses.append("decision=%s"); args.append(decision)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return int(_fetch(f"SELECT COUNT(*) AS n FROM claim_bundle {where}", tuple(args))[0]["n"])
+
+
 def review_queue_count() -> int:
     return int(_fetch("SELECT COUNT(*) AS n FROM claim_bundle WHERE status IN ('NEEDS_REVIEW','ON_HOLD')")[0]["n"])
 
@@ -579,19 +612,25 @@ def list_audit_events(claim_id: str) -> list[dict]:
 
 
 def search_audit_events(entity_type: str | None = None, entity_id: str | None = None, actor: str | None = None,
-                        limit: int = 200, since=None) -> list[dict]:
-    """The audit log across every entity, newest first."""
+                        limit: int = 200, since=None, q: str | None = None, offset: int = 0,
+                        event: str | None = None) -> list[dict]:
+    """The audit log across every entity, newest first. `q` searches the event, actor, entity
+    id and detail; `event` keeps one event type (agent_completed = investigation notes);
+    `offset` skips that many rows (pagination)."""
     clauses, args = [], []
+    if q:
+        clauses.append("(event LIKE %s OR actor LIKE %s OR entity_id LIKE %s OR detail LIKE %s)")
+        args.extend([f"%{q}%"] * 4)
     if since:
         clauses.append("created_at >= %s")
         args.append(since)
-    for col, value in (("entity_type", entity_type), ("entity_id", entity_id), ("actor", actor)):
+    for col, value in (("entity_type", entity_type), ("entity_id", entity_id), ("actor", actor), ("event", event)):
         if value:
             clauses.append(f"{col}=%s")
             args.append(value)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    return _audit_rows(_fetch(f"SELECT {_AUDIT_COLS} FROM audit_event {where} ORDER BY id DESC LIMIT %s",
-                              (*args, limit)))
+    return _audit_rows(_fetch(f"SELECT {_AUDIT_COLS} FROM audit_event {where} ORDER BY id DESC LIMIT %s OFFSET %s",
+                              (*args, limit, max(0, offset))))
 
 
 # ---- LangGraph checkpoints (app.checkpoint_mysql.MySQLSaver) ---------------------------
@@ -660,7 +699,7 @@ def insert_logs(rows: list[dict]) -> None:
 
 
 def search_logs(level: str | None = None, source: str | None = None, q: str | None = None,
-                limit: int = 200, since=None) -> list[dict]:
+                limit: int = 200, since=None, offset: int = 0) -> list[dict]:
     clauses, args = [], []
     if since:
         clauses.append("created_at >= %s")
@@ -679,7 +718,7 @@ def search_logs(level: str | None = None, source: str | None = None, q: str | No
         args.append(f"%{q}%")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = _fetch(f"SELECT id, created_at, level, logger, source, message, exc_text FROM app_log {where} "
-                  "ORDER BY id DESC LIMIT %s", (*args, limit))
+                  "ORDER BY id DESC LIMIT %s OFFSET %s", (*args, limit, max(0, offset)))
     for r in rows:
         r["created_at"] = r["created_at"].isoformat(timespec="milliseconds") + "Z"
     return rows
@@ -763,13 +802,14 @@ def get_patient(patient_id: str) -> dict | None:
     return _patient_row(rows[0]) if rows else None
 
 
-def list_patients(search: str | None = None, limit: int = 200) -> list[dict]:
+def list_patients(search: str | None = None, limit: int = 200, offset: int = 0) -> list[dict]:
+    offset = max(0, offset)
     if search:
         like = f"%{search}%"
         rows = _fetch(f"{_PATIENT_SELECT} WHERE full_name LIKE %s OR policy_number LIKE %s "
-                      "ORDER BY full_name LIMIT %s", (like, like, limit))
+                      "ORDER BY full_name LIMIT %s OFFSET %s", (like, like, limit, offset))
     else:
-        rows = _fetch(f"{_PATIENT_SELECT} ORDER BY full_name LIMIT %s", (limit,))
+        rows = _fetch(f"{_PATIENT_SELECT} ORDER BY full_name LIMIT %s OFFSET %s", (limit, offset))
     return [_patient_row(r) for r in rows]
 
 

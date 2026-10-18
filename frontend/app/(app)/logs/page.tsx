@@ -1,5 +1,8 @@
 import Link from "next/link";
 import { HBars, Level, VolumePoint, VolumeChart } from "@/components/LogCharts";
+import Pager from "@/components/Pager";
+import SearchBox from "@/components/SearchBox";
+import { apiQuery, pageOf, pageRows } from "@/lib/paging";
 import { serverApi } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
@@ -60,22 +63,25 @@ function Tile({ label, value, sub, tone }: { label: string; value: string; sub?:
 }
 
 export default async function LogsPage({ searchParams }: {
-  searchParams: Promise<{ tab?: string; range?: string; level?: string; source?: string; q?: string }>;
+  searchParams: Promise<{ tab?: string; range?: string; level?: string; source?: string; q?: string; page?: string }>;
 }) {
   const sp = await searchParams;
   const tab: Tab = sp.tab === "analytics" ? "analytics" : "records";
   const range = RANGES.some(([r]) => r === sp.range) ? sp.range! : "24h";
   const { level, source, q } = sp;
+  const page = pageOf(sp);
 
   const filters = new URLSearchParams({ range, ...(level && { level }), ...(source && { source }) });
   const recordQs = new URLSearchParams(filters);
   if (q) recordQs.set("q", q);
-  const [{ sources, rows }, stats] = await Promise.all([
-    serverApi<{ sources: string[]; rows: LogRow[] }>(`/api/logs?${recordQs}`),
+  const [{ sources, rows: fetched }, stats] = await Promise.all([
+    serverApi<{ sources: string[]; rows: LogRow[] }>(`/api/logs?${apiQuery(page, { range, level, source, q })}`),
     tab === "analytics" ? serverApi<LogStats>(`/api/logs/stats?${filters}`) : Promise.resolve(null),
   ]);
 
-  const href = (patch: Record<string, string | undefined>) => {
+  const { rows, hasNext } = pageRows(fetched);
+  const listParams = { tab, range, level, source, q };
+  const href = (patch: Record<string, string | undefined>) => {                 // a filter change goes back to page 1
     const next = new URLSearchParams({ tab, range, ...(level && { level }), ...(source && { source }), ...(q && { q }) });
     Object.entries(patch).forEach(([k, v]) => (v ? next.set(k, v) : next.delete(k)));
     return `/logs?${next}`;
@@ -127,13 +133,8 @@ export default async function LogsPage({ searchParams }: {
         <Link href={href({ source: undefined })} className={chip(!source)}>all sources</Link>
         {sources.map((s) => <Link key={s} href={href({ source: s })} className={chip(source === s)}>{s}</Link>)}
         {tab === "records" && (
-          <form action="/logs" className="ml-auto flex gap-2">
-            <input type="hidden" name="tab" value="records" />
-            <input type="hidden" name="range" value={range} />
-            {level && <input type="hidden" name="level" value={level} />}
-            {source && <input type="hidden" name="source" value={source} />}
-            <input name="q" defaultValue={q} placeholder="Search messages" aria-label="Search messages" className="input w-56 py-1.5 text-xs" />
-          </form>
+          <SearchBox path="/logs" params={listParams} keep={["tab", "range", "level", "source"]}
+            placeholder="Search messages" className="ml-auto" />
         )}
       </div>
 
@@ -154,7 +155,8 @@ export default async function LogsPage({ searchParams }: {
               </div>
             </details>
           ))}
-          {rows.length === 0 && <p className="p-8 text-center text-sm text-slate-500">No log records in this range.</p>}
+          {rows.length === 0 && <p className="p-8 text-center text-sm text-slate-500">{q ? `No log records match "${q}".` : "No log records in this range."}</p>}
+          <Pager path="/logs" params={listParams} page={page} hasNext={hasNext} shown={rows.length} className="px-4 pb-3" />
         </div>
       ) : stats && (
         <div className="space-y-4">

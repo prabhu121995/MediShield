@@ -111,6 +111,22 @@ class UploadCheckTests(unittest.TestCase):
         self.assertEqual(cm.exception.status, 422)
 
 
+class IntakeNameTests(unittest.TestCase):
+    RULES = {"filename_hints": {"ID_DOCUMENT": ["id", "card"], "CLAIM_FORM": ["claim", "bill"]},
+             "patient_ref_pattern": r"PT_\d+"}
+
+    def test_name_types_match_whole_words_only(self):
+        from app.claim import intake
+        self.assertEqual(intake.name_types("claim_PT_19116.png", self.RULES), {"CLAIM_FORM"})
+        self.assertEqual(intake.name_types("aaaaaa.png", self.RULES), set())
+        self.assertEqual(intake.name_types("valid-scan.png", self.RULES), set())      # "valid" is not "id"
+
+    def test_patient_refs_are_upper_cased_and_deduplicated(self):
+        from app.claim import intake
+        self.assertEqual(intake.patient_refs(["id_pt_19116.png", "claim_PT_19116_dup.png", "x.png"], self.RULES),
+                         {"PT_19116"})
+
+
 class CreateBundleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -149,7 +165,10 @@ class CreateBundleTests(unittest.TestCase):
             mock.patch("app.main.claims_service.submit_claim", side_effect=submit),
             mock.patch("app.main.claims_service.active_claim", side_effect=lambda exclude=None: self.active),
             mock.patch.object(config, "UPLOAD_DIR", pathlib.Path(self.tmp.name)),
+            mock.patch("app.main._required_documents", side_effect=lambda: self.required),
+            mock.patch("app.main.intake.register_patient", return_value=None),   # no real patient table
         ]
+        self.required: list[str] = []                      # tests of the required-document gate set this
         for p in self.patches:
             p.start()
         app.dependency_overrides[auth.current_user] = lambda: AGENT
@@ -228,6 +247,57 @@ class CreateBundleTests(unittest.TestCase):
         self.assertEqual(res.status_code, 422)
         self.assertEqual(self.bundles, {})
         self.assertEqual(list(pathlib.Path(self.tmp.name).iterdir()), [])
+
+    def test_missing_required_document_is_refused_before_anything_runs(self):
+        self.required = ["CLAIM_FORM", "ID_DOCUMENT"]
+        res = self.post([("claim.png", png_bytes()), ("other.png", png_bytes())], categories=["CLAIM_FORM", ""])
+        self.assertEqual(res.status_code, 422, res.text)
+        self.assertIn("ID_DOCUMENT", res.json()["detail"])
+        self.assertEqual(self.bundles, {})
+        self.assertEqual(self.enqueued, [])
+        self.assertEqual(list(pathlib.Path(self.tmp.name).iterdir()), [])     # nothing stored
+
+    def test_untyped_files_do_not_count_as_required_documents(self):
+        self.required = ["CLAIM_FORM"]
+        self.assertEqual(self.post([("claim.png", png_bytes())]).status_code, 422)
+
+    def test_claim_with_every_required_document_is_accepted(self):
+        self.required = ["CLAIM_FORM", "ID_DOCUMENT"]
+        res = self.post([("claim.png", png_bytes()), ("id.png", png_bytes()), ("x.png", png_bytes())],
+                        categories=["CLAIM_FORM", "ID_DOCUMENT", ""])
+        self.assertEqual(res.status_code, 202, res.text)
+        self.assertEqual(self.client.get("/api/claim-bundles/requirements").json()["required_documents"],
+                         ["CLAIM_FORM", "ID_DOCUMENT"])
+
+    def test_file_named_for_another_document_is_refused(self):
+        res = self.post([("claim_PT_19116.png", png_bytes())], categories=["ID_DOCUMENT"])
+        self.assertEqual(res.status_code, 422, res.text)
+        self.assertIn("CLAIM_FORM", res.json()["detail"])
+        self.assertEqual(self.enqueued, [])
+
+    def test_file_name_with_no_hint_goes_anywhere(self):
+        res = self.post([("aaaaaa.png", png_bytes()), ("claim_PT_19116.png", png_bytes())],
+                        categories=["ID_DOCUMENT", "CLAIM_FORM"])
+        self.assertEqual(res.status_code, 202, res.text)
+
+    def test_files_for_different_patients_are_refused(self):
+        res = self.post([("id_PT_1.png", png_bytes()), ("claim_PT_2.png", png_bytes())],
+                        categories=["ID_DOCUMENT", "CLAIM_FORM"])
+        self.assertEqual(res.status_code, 422, res.text)
+        self.assertIn("different patients", res.json()["detail"])
+
+    def test_files_for_another_patient_than_the_chosen_one_are_refused(self):
+        self.patients["p1"]["member_id"] = "PT_1"
+        res = self.post([("claim_PT_2.png", png_bytes())], categories=["CLAIM_FORM"], patient_id="p1")
+        self.assertEqual(res.status_code, 422, res.text)
+
+    def test_patient_named_in_the_files_is_linked_and_registered_if_new(self):
+        with mock.patch("app.main.intake.register_patient", return_value="p1") as register:
+            res = self.post([("id_pt_19116.png", png_bytes()), ("claim_PT_19116.png", png_bytes())],
+                            categories=["ID_DOCUMENT", "CLAIM_FORM"])
+        self.assertEqual(res.status_code, 202, res.text)
+        register.assert_called_once_with("PT_19116", "agent1")
+        self.assertEqual(res.json()["patient_id"], "p1")
 
     def test_blank_title_gets_a_default(self):
         res = self.post([("a.png", png_bytes()), ("b.png", png_bytes())], title=" ")

@@ -3,7 +3,8 @@ Fraud agent: the six signal tags of dataset_summary.md section 3, checked across
 document in the claim and against the member's history in the database.
 
 Tag                 Rule (parameters and severities: pipeline_rules.json "fraud")
-id_expired          an ID page's expiry date is before the treatment date
+id_expired          an ID page's expiry date is before the treatment date (insurance cards
+                    are left to KYC, which rejects an expired card)
 dob_mismatch        the date of birth differs between pages, or from the member record
 policy_mismatch     the policy number differs between pages, or from the member record
 duplicate_claim     two claim forms in this claim with the same claim number, or the same
@@ -17,6 +18,9 @@ readmission_30d     two different stays (claim form, discharge summary, history)
                     later admission is within `days` of the earlier discharge, or a prior
                     discharge the summary itself reports
 date_conflict       prescription date `days` or more from the service/discharge date
+missing_field       a medical page lacks a required field (pipeline_rules document_types
+                    `required`), or the page itself marks a field missing or illegible
+                    (e.g. an unsigned claim form or prescription)
 
 score = 1 - product(1 - severity). Independent signals compound; one HIGH signal is
 enough to reach the 0.3 escalation line on its own.
@@ -166,9 +170,11 @@ def treatment_date(docs: list[dict]) -> tuple[date | None, str]:
     return None, ""
 
 
-def id_expiry(docs: list[dict]) -> list[dict]:
+def id_expiry(docs: list[dict], skip: set[str] = frozenset()) -> list[dict]:
     ref, source = treatment_date(docs)
     for d in docs:
+        if d.get("file_name") in skip:
+            continue
         expiry = parse_date((d.get("fields") or {}).get("id_expiry_date")) if d.get("doc_type") == "ID_DOCUMENT" else None
         if ref and expiry and expiry < ref:
             return [_flag("id_expired", f"{d['file_name']} expired {expiry}, before the {source} ({ref})", [d["file_name"]])]
@@ -203,6 +209,22 @@ def policy_mismatch(docs: list[dict], member: dict | None) -> list[dict]:
     return []
 
 
+def missing_fields(docs: list[dict]) -> list[dict]:
+    from app.claim.claims import schema_errors      # the claims agent only extracts; the flag is ours
+    rules = config.RULES
+    medical = set(rules["medical_documents"])
+    out = []
+    for d in docs:
+        if d.get("doc_type") not in medical:
+            continue
+        errors = schema_errors(d, rules)
+        if errors:
+            listed = ", ".join(e["field"] + (" (marked missing on the page)" if e["code"] == "MARKED_MISSING" else "")
+                               for e in errors)
+            out.append(_flag("missing_field", f"{d['file_name']} lacks {listed}", [d["file_name"]]))
+    return out
+
+
 def score(anomalies: list[dict]) -> float:
     survive = 1.0
     for a in anomalies:
@@ -226,9 +248,9 @@ def assess(state: ClaimState, repo) -> dict:
     claim_history = repo.claims_for_member(member["member_id"], exclude) if member else []
     stay_history = repo.clinical_events_for_member(member["member_id"], exclude) if member else []
 
-    anomalies = (id_expiry(docs) + dob_mismatch(docs, member) + policy_mismatch(docs, member) + duplicates(claim, claims.get("additional_claims") or [], claim_history)
+    anomalies = (id_expiry(docs, set(kyc.get("insurance_cards") or [])) + dob_mismatch(docs, member) + policy_mismatch(docs, member) + duplicates(claim, claims.get("additional_claims") or [], claim_history)
                  + structuring(claim) + proc_diag(claim, clinical) + names(docs, member)
-                 + readmission(claim, clinical, stay_history) + rx_dates(claim, clinical))
+                 + readmission(claim, clinical, stay_history) + rx_dates(claim, clinical) + missing_fields(docs))
     value = score(anomalies)
     tags = [a["type"] for a in anomalies]
     return {

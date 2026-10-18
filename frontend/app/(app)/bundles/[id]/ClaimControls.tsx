@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { ClaimHold, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, stopClaim } from "@/lib/api";
+import { ClaimHold, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, resumeClaim, stopClaim } from "@/lib/api";
 import { allowedFile, MAX_BATCH_FILES, UPLOAD_EXTENSIONS } from "@/lib/settings";
 
 const ACCEPT = UPLOAD_EXTENSIONS.join(",");
@@ -26,16 +26,16 @@ function useAction() {
   return { busy, error, run };
 }
 
-// A running claim: stop it before its next agent starts (the agent running now finishes first).
-export function StopButton({ claimId, stopping }: { claimId: string; stopping: boolean }) {
+// A running claim: stop it at once. The model call in flight is abandoned; Resume continues
+// from the last finished step.
+export function StopButton({ claimId }: { claimId: string }) {
   const { busy, error, run } = useAction();
   const [sure, setSure] = useState(false);
-  if (stopping) return <span className="text-xs font-medium text-slate-600">Stopping after the current step…</span>;
   return (
     <span className="flex flex-wrap items-center gap-2">
       {sure ? (
         <>
-          <span className="text-xs text-slate-700">Stop this claim after the current step?</span>
+          <span className="text-xs text-slate-700">Stop this claim now? You can resume it later.</span>
           <button type="button" className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
             disabled={busy} onClick={() => run(() => stopClaim(claimId))}>Yes, stop</button>
           <button type="button" className="btn-ghost px-3 py-1.5 text-xs" onClick={() => setSure(false)}>Keep running</button>
@@ -44,6 +44,18 @@ export function StopButton({ claimId, stopping }: { claimId: string; stopping: b
         <button type="button" className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50"
           onClick={() => setSure(true)}>Stop claim</button>
       )}
+      {error && <span role="alert" className="text-xs text-rose-700">{error}</span>}
+    </span>
+  );
+}
+
+// A stopped claim: pick up where it stopped.
+export function ResumeButton({ claimId }: { claimId: string }) {
+  const { busy, error, run } = useAction();
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <button type="button" className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 disabled:opacity-50"
+        disabled={busy} onClick={() => run(() => resumeClaim(claimId))}>{busy ? "Resuming…" : "Resume claim"}</button>
       {error && <span role="alert" className="text-xs text-rose-700">{error}</span>}
     </span>
   );
@@ -94,20 +106,21 @@ export function ReplaceAllButton({ claimId }: { claimId: string }) {
   );
 }
 
-// Human in the loop for a claim ON_HOLD. Step one (reading every page) must be complete
-// before the claim agents run; when it is not, a person continues, stops or re-uploads.
+// Human in the loop for a claim ON_HOLD. Every page is classified first; an unknown, blurry
+// or failed page stops the claim before any page is read. A person continues, stops or re-uploads.
 export function HoldPanel({ claimId, hold, waitingAtHold }: { claimId: string; hold: ClaimHold; waitingAtHold: boolean }) {
   const { busy, error, run } = useAction();
   const [note, setNote] = useState("");
   const ingest = hold.stage === "ingest";
+  const atClassify = ingest && hold.step !== "extract";
   return (
     <section className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-4 text-orange-950" role="status" aria-labelledby="hold-h">
       <h2 id="hold-h" className="text-sm font-semibold">
-        On hold: {ingest ? "page reading did not complete" : "an agent did not complete"}. A person must decide.
+        On hold: {atClassify ? "a page is unknown or blurry" : ingest ? "a page could not be read" : "an agent did not complete"}. A person must decide.
       </h2>
       <p className="mt-0.5 text-xs">
         {ingest
-          ? "The claim agents (KYC, claims, policy, fraud) did not run. Re-upload the page, re-upload every page, continue with the pages as they are (the claim will be escalated), or stop the claim."
+          ? `${atClassify ? "No page was read yet and the" : "The"} claim agents (KYC, claims, policy, fraud) did not run. Re-upload the page, re-upload every page, continue with the pages as they are (the claim will be escalated), or stop the claim.`
           : "The claim was not decided on complete information. Re-run it, re-upload the pages, stop it, or record a decision in Human review."}
       </p>
       <ul className="mt-3 space-y-2">

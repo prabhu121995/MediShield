@@ -2,11 +2,12 @@
 Orchestrator, second half: the final decision. A deferred LangGraph node, so it runs once,
 after every upstream branch has written its output into the shared state.
 
-    ESCALATE  fraud score >= 0.3
+    ESCALATE  fraud score >= 0.3 (every fraud signal and flag, incl. missing fields)
+              OR the insurance card is not valid (KYC asks for a person)
               OR any agent confidence < 0.6 (a page, kyc, claims, policy, fraud)
               OR an agent errored, a page is UNKNOWN, or a required document is missing
-    REJECT    KYC failed OR a procedure is not covered OR the claim schema is invalid
-    APPROVE   KYC passed + claim valid + covered + fraud score < 0.3
+    REJECT    the claimant's name is not a member (KYC failed) OR a procedure is not covered
+    APPROVE   name is a member + card valid + covered + fraud score < 0.3
 
 Precedence ESCALATE > REJECT > APPROVE: a human look is cheaper than wrongly rejecting a
 policyholder, and a suspected fraud must reach a person, not an automatic letter.
@@ -78,6 +79,8 @@ def decide(state: ClaimState) -> dict:
         escalate.append("unrecognised document(s): " + ", ".join(plan["unknown_documents"]))
     if plan.get("missing_required"):
         escalate.append("missing required document(s): " + ", ".join(plan["missing_required"]))
+    if kyc and "error" not in kyc and kyc.get("needs_review"):
+        escalate.extend(kyc.get("review_reasons") or ["KYC asks for human review"])
     if fraud.get("fraud_score", 0.0) >= th["fraud_escalate_min"]:
         escalate.append(f"fraud score {fraud['fraud_score']:.2f} ({', '.join(fraud.get('tags', []))})")
 
@@ -85,15 +88,13 @@ def decide(state: ClaimState) -> dict:
         reject.append("KYC failed: " + ", ".join(kyc.get("fail_reasons") or kyc.get("flags", [])))
     if policy and "error" not in policy and policy.get("covered") is False:
         reject.append("procedure not covered: " + "; ".join(policy.get("exclusions", [])))
-    if claims and "error" not in claims and claims.get("schema_valid") is False:
-        reject.append("schema invalid: " + "; ".join(claims.get("schema_errors", [])))
 
     if escalate:
         decision, reasons = "ESCALATE", escalate + reject
     elif reject:
         decision, reasons = "REJECT", reject
     else:
-        decision, reasons = "APPROVE", ["KYC passed, claim valid, all procedures covered, fraud score "
+        decision, reasons = "APPROVE", ["KYC passed, all procedures covered, fraud score "
                                         f"{fraud.get('fraud_score', 0.0):.2f} < {th['fraud_escalate_min']}"]
 
     lead = {"ESCALATE": "Escalated to human review", "REJECT": "Rejected", "APPROVE": "Approved"}[decision]

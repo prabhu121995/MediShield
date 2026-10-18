@@ -1,12 +1,17 @@
+import Pager from "@/components/Pager";
+import SearchBox from "@/components/SearchBox";
+import { pageOf, slicePage } from "@/lib/paging";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import AutoRefresh from "@/components/AutoRefresh";
 import Badge from "@/components/Badge";
+import ClaimDownloads from "@/components/ClaimDownloads";
+import WorkflowGraph, { EdgeKind, GraphEdge, GraphNode } from "@/components/WorkflowGraph";
 import { AgentSummary, AuditEvent, ClaimBundle, ClaimResult, Patient } from "@/lib/api";
 import { claimProgress, fmtMs, PageProgress, Progress, Stage, StageState } from "@/lib/progress";
 import { ApiError, serverApi } from "@/lib/server-api";
 import { LONG_STEP_S } from "@/lib/settings";
-import { HoldPanel, ReplacePageButton, StopButton } from "./ClaimControls";
+import { HoldPanel, ReplacePageButton, ResumeButton, StopButton } from "./ClaimControls";
 import ClaimReview from "./ClaimReview";
 
 export const dynamic = "force-dynamic";
@@ -26,14 +31,33 @@ const TONE: Record<string, string> = {
   ESCALATE: "border-amber-200 bg-amber-50/80 text-amber-900",
 };
 
+// Icon paths (24x24, stroked) for each agent card.
+const ICONS: Record<string, string> = {
+  classify: "M7 7h.01M3 11l8.6 8.6a2 2 0 002.8 0l5.2-5.2a2 2 0 000-2.8L11 3H3v8z",
+  extract: "M9 13h6m-6 4h4M7 3h7l5 5v13H7zM14 3v5h5",
+  kyc: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z",
+  claims: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2M9 12h6m-6 4h4",
+  policy: "M9 12l2 2 4-4m5.6-4.4A11.9 11.9 0 0112 2.9 11.9 11.9 0 013.4 5.6 12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.1-2.3-.4-3.4z",
+  fraud: "M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z",
+};
+
+// Per state: the accent strip on top of a card, and the tint of its icon tile.
+const CARD_TONE: Record<string, { bar: string; tile: string }> = {
+  done: { bar: "bg-emerald-500", tile: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+  error: { bar: "bg-rose-500", tile: "bg-rose-50 text-rose-700 ring-rose-200" },
+  running: { bar: "bg-sky-500 animate-pulse", tile: "bg-sky-50 text-sky-700 ring-sky-200" },
+  hold: { bar: "bg-orange-400", tile: "bg-orange-50 text-orange-700 ring-orange-200" },
+  waiting: { bar: "bg-slate-200", tile: "bg-slate-50 text-slate-400 ring-slate-200" },
+  skipped: { bar: "bg-slate-200", tile: "bg-slate-50 text-slate-400 ring-slate-200" },
+};
+
 const AGENTS: { key: string; title: string; role: string }[] = [
-  { key: "preprocess", title: "Preprocessor agent", role: "Vision model: image → text, image quality, blur score" },
-  { key: "classify", title: "Classifier agent", role: "Vision model: document type, or UNKNOWN below the confidence bar" },
-  { key: "extract", title: "Extractor agent", role: "Text model: that type's fields from the page text" },
-  { key: "kyc", title: "KYC agent", role: "Member, ID validity, identity across pages" },
-  { key: "claims", title: "Claims agent", role: "Claim form schema and clinical facts" },
-  { key: "policy", title: "Policy agent", role: "CPT coverage: retrieved clauses + LLM (RAG)" },
-  { key: "fraud", title: "Fraud agent", role: "Six signal tags across documents and history" },
+  { key: "classify", title: "Classifier agent", role: "Every page first: vision model document type (or UNKNOWN), image quality, blur score" },
+  { key: "extract", title: "Preprocess + extract agent", role: "Vision model: image → text; text model: that type's fields" },
+  { key: "kyc", title: "KYC agent", role: "Name in the member database; insurance card valid (else human review)" },
+  { key: "claims", title: "Claims agent", role: "Extracts the claim details and briefs the policy agent" },
+  { key: "policy", title: "Policy agent", role: "Covered or not: claim brief + retrieved clauses + LLM (RAG)" },
+  { key: "fraud", title: "Fraud agent", role: "Investigates every fraud signal and flag, incl. missing fields" },
 ];
 
 function pct(v: number | null | undefined) {
@@ -90,7 +114,7 @@ function Stepper({ progress }: { progress: Progress }) {
               ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
               : <span aria-hidden>{s.state === "done" ? "✓" : s.state === "error" ? "✕" : s.state === "hold" ? "⏸" : s.state === "skipped" ? "–" : "○"}</span>}
             {s.label}
-            {["preprocess", "classify", "extract"].includes(s.key) && s.state !== "waiting" && s.state !== "running" && <span className="font-normal opacity-75">{s.note}</span>}
+            {["classify", "extract"].includes(s.key) && s.state !== "waiting" && s.state !== "running" && <span className="font-normal opacity-75">{s.note}</span>}
             {s.state === "running" && s.startedAt && <span className="font-normal tabular-nums opacity-75">{isLong(s) ? "in progress " : ""}{elapsed(s.startedAt)}</span>}
           </span>
         </li>
@@ -99,22 +123,56 @@ function Stepper({ progress }: { progress: Progress }) {
   );
 }
 
-// Same size for every card; long content scrolls inside the card.
-function AgentCard({ title, role, stage, summary, confidence, children }: {
-  title: string; role: string; stage: Stage; summary?: string; confidence?: number | null; children?: React.ReactNode;
+// A graph node, n8n style: the header (icon, name, status, one-line result) is always shown;
+// the points (confidence and details) fold away under its toggle so the graph stays compact.
+// Uncontrolled <details>, so a node stays open across the page's auto-refresh.
+function AgentCard({ title, role, stage, summary, confidence, perPage, children }: {
+  title: string; role: string; stage: Stage; summary?: string; confidence?: number | null; perPage?: boolean; children?: React.ReactNode;
 }) {
   const finished = stage.state === "done" || stage.state === "error";
+  const tone = CARD_TONE[stage.state] ?? CARD_TONE.waiting;
+  const headline = finished && summary ? summary : role;
   return (
-    <div className={`card flex h-80 flex-col p-4 transition ${stage.state === "running" ? "ring-2 ring-sky-400" : ""}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-slate-900">{title}</p>
-          <p className="truncate text-[11px] text-slate-500" title={role}>{role}</p>
+    <details data-points className={`group/node relative overflow-hidden rounded-2xl bg-white ring-1 transition duration-300 ease-out
+      ${stage.state === "skipped" ? "opacity-70" : ""}
+      shadow-[0_1px_2px_rgba(15,23,42,0.05),0_8px_24px_-12px_rgba(15,23,42,0.18)] hover:shadow-[0_2px_4px_rgba(15,23,42,0.06),0_16px_32px_-12px_rgba(15,23,42,0.25)]
+      ${stage.state === "running" ? "ring-2 ring-sky-400" : stage.state === "hold" ? "ring-2 ring-orange-400" : "ring-slate-200/80"}`}>
+      <span className={`absolute inset-x-0 top-0 h-1 ${tone.bar}`} aria-hidden />
+      <summary className="block cursor-pointer list-none [&::-webkit-details-marker]:hidden" title={`${title}: ${role}`}>
+       <span className="flex items-center gap-2.5 px-3 pb-2 pt-2.5">
+        <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ring-1 ring-inset ${tone.tile}`} aria-hidden>
+          <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.9">
+            <path strokeLinecap="round" strokeLinejoin="round" d={ICONS[stage.key] ?? ICONS.claims} />
+          </svg>
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="truncate text-sm font-semibold text-slate-900">{title}</span>
+            {perPage && <span className="shrink-0 rounded bg-slate-100 px-1 text-[10px] font-medium text-slate-500" title="Runs once for each page">↻ page</span>}
+          </span>
+          <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+            <StateChip stage={stage} />
+          </span>
+        </span>
+        <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-400 transition group-open/node:rotate-180" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+        </svg>
+        <span className="sr-only">Show or hide details</span>
+       </span>
+       {/* The one-line result, while the points are folded away */}
+       <span className={`block truncate border-t border-slate-100 px-3 py-1.5 text-[11px] group-open/node:hidden ${stage.state === "error" ? "text-rose-700" : "text-slate-500"}`}>
+         {headline}
+       </span>
+      </summary>
+      {finished && confidence != null && (
+        <div className="flex items-center gap-2 border-t border-slate-100 px-3 pt-2 text-[11px] tabular-nums text-slate-500">
+          <span>confidence {pct(confidence)}</span>
+          <span className="h-1 flex-1 overflow-hidden rounded-full bg-slate-100" aria-hidden>
+            <span className={`block h-full rounded-full ${confidence >= 0.6 ? "bg-emerald-400" : "bg-amber-400"}`} style={{ width: `${Math.round(confidence * 100)}%` }} />
+          </span>
         </div>
-        <StateChip stage={stage} />
-      </div>
-      {finished && confidence != null && <p className="mt-1 text-[11px] tabular-nums text-slate-500">confidence {pct(confidence)}</p>}
-      <div className="mt-2 min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1 text-xs">
+      )}
+      <div className="mx-3 mb-3 mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-xl bg-slate-50/70 p-2.5 text-xs ring-1 ring-inset ring-slate-100">
         {stage.state === "running" && (isLong(stage)
           ? <p className="text-indigo-800">In progress for {elapsed(stage.startedAt)}. It keeps working in the background; you can leave this page.</p>
           : <p className="text-sky-800">Working on it. This card fills in when the agent finishes.</p>)}
@@ -124,33 +182,32 @@ function AgentCard({ title, role, stage, summary, confidence, children }: {
         {finished && summary && <p className={stage.state === "error" ? "text-rose-700" : "text-slate-700"}>{summary}</p>}
         {children}
       </div>
-    </div>
+    </details>
   );
 }
 
 // What one page step returned, one line per page, from that step's audit row.
 function pageLine(step: string, p: PageProgress): string {
-  const st = p.steps[step];
+  const st = p.steps[step] ?? { state: "waiting" as const };
   const d = st.detail ?? {};
   if (st.state === "running") return `running · ${elapsed(st.startedAt)}`;
   if (st.state === "waiting") return "queued";
   if (d.skipped) return "skipped (earlier step failed)";
   if (d.error) return `failed: ${String(d.error).slice(0, 80)}`;
   const t = st.durationMs != null ? ` · ${fmtMs(st.durationMs)}` : "";
-  if (step === "preprocess") return `${Number(d.text_chars ?? 0).toLocaleString()} chars · ${d.image_quality ?? "clear"}${d.is_blurry ? " · blurry" : ""}${t}`;
-  if (step === "classify") return `${String(d.doc_type ?? "").replaceAll("_", " ").toLowerCase()} · ${pct(d.classifier_confidence as number)}${t}`;
-  return `${((d.fields_extracted as string[]) ?? []).length} fields${((d.fields_marked_missing as string[]) ?? []).length ? ` · ${((d.fields_marked_missing as string[])).length} missing` : ""}${t}`;
+  if (step === "classify") return `${String(d.doc_type ?? "").replaceAll("_", " ").toLowerCase()} · ${pct(d.classifier_confidence as number)}${d.is_blurry ? " · blurry" : ""}${t}`;
+  return `${Number(d.text_chars ?? 0).toLocaleString()} chars · ${((d.fields_extracted as string[]) ?? []).length} fields${((d.fields_marked_missing as string[]) ?? []).length ? ` · ${((d.fields_marked_missing as string[])).length} missing` : ""}${t}`;
 }
 
 function PageSteps({ step, progress }: { step: string; progress: Progress }) {
   return (
     <ul className="space-y-1 text-[11px] text-slate-600">
-      {progress.pages.map((p) => {
-        const st = p.steps[step];
-        const bad = st.state === "error" || (step === "classify" && p.steps.classify.detail?.doc_type === "UNKNOWN");
+      {progress.pages.map((p, i) => {
+        const st = p.steps[step] ?? { state: "waiting" as const };
+        const bad = st.state === "error" || (step === "classify" && (p.steps.classify.detail?.doc_type === "UNKNOWN" || Boolean(p.steps.classify.detail?.is_blurry)));
         return (
           <li key={p.doc_id} className="flex items-center justify-between gap-2">
-            <span className="truncate" title={p.file_name}>{p.file_name}</span>
+            <span className="truncate" title={p.file_name}><span className="tabular-nums text-slate-400">{i + 1}.</span> {p.file_name}</span>
             <span title={String(st.detail?.note ?? "")} className={`shrink-0 text-right font-medium ${st.state === "running" ? "text-sky-700"
               : bad ? "text-rose-700" : st.state === "waiting" ? "text-slate-400" : "text-slate-800"}`}>{pageLine(step, p)}</span>
           </li>
@@ -170,77 +227,201 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
   const liveSummary = (key: string) => {
     const d = st[key].detail ?? {};
     if (d.error) return String(d.error);
-    if (key === "kyc") return d.kyc_passed === false ? `failed: ${((d.flags as string[]) ?? []).join(", ")}` : "passed";
-    if (key === "claims") return d.schema_valid === false ? "schema errors found" : "schema valid";
+    if (key === "kyc") return d.kyc_passed === false ? `failed: ${((d.flags as string[]) ?? []).join(", ")}`
+      : d.needs_review ? "member found; insurance card not valid: human review" : "passed";
+    if (key === "claims") return "details extracted · sent to the policy agent";
     if (key === "policy") return d.covered === false ? "not covered" : "covered";
     if (key === "fraud") return `score ${d.fraud_score ?? 0}${(d.tags as string[] | undefined)?.length ? `: ${(d.tags as string[]).join(", ")}` : ""}`;
     return "";
   };
-  const props = (i: number, key: string) => ({
-    ...AGENTS[i], stage: st[key],
+  const agent = (key: string) => AGENTS.find((a) => a.key === key)!;
+  const props = (key: string) => ({
+    ...agent(key), stage: st[key],
     summary: full ? s[key]?.summary : liveSummary(key),
     confidence: full ? s[key]?.confidence : (st[key].detail?.confidence as number | undefined),
   });
-  const pageCard = (i: number) => {
-    const key = AGENTS[i].key;
+  const pageCard = (key: string) => {
     const stage = st[key];
     return (
-      <AgentCard {...AGENTS[i]} stage={stage} summary={stage.state === "done" || stage.state === "error" ? stage.note : undefined}>
+      <AgentCard {...agent(key)} stage={stage} perPage summary={stage.state === "done" || stage.state === "error" ? stage.note : undefined}>
         <PageSteps step={key} progress={progress} />
       </AgentCard>
     );
   };
+
+  const kycCard = (
+    <AgentCard {...props("kyc")}>
+      {full && kyc?.member && <p className="text-[11px] text-slate-600">Member {kyc.member.member_id} · {kyc.member.full_name}</p>}
+      {full && kyc?.needs_review && (
+        <p className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800">⚑ Human review: {(kyc.review_reasons ?? []).join("; ")}</p>
+      )}
+      {full && (
+        <ul className="space-y-1 text-[11px]">
+          {(kyc?.checks ?? []).map((c, i) => (
+            <li key={i} className={c.passed === false ? "text-rose-700" : c.passed ? "text-slate-600" : "text-amber-700"}>
+              {c.passed === false ? "✕" : c.passed ? "✓" : "?"} {c.detail}
+            </li>
+          ))}
+        </ul>
+      )}
+    </AgentCard>
+  );
+  const claimsCard = (
+    <AgentCard {...props("claims")}>
+      {full && claims?.claim && (
+        <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px] text-slate-600">
+          <dt>Claim no.</dt><dd className="text-slate-800">{String(fields.claim_number ?? "—")}</dd>
+          <dt>Amount</dt><dd className="text-slate-800">{fields.claim_amount != null ? `$${Number(fields.claim_amount).toLocaleString()}` : "—"}</dd>
+          <dt>Service</dt><dd className="text-slate-800">{String(fields.service_date ?? "—")}</dd>
+          <dt>ICD-10</dt><dd className="text-slate-800">{((fields.icd10_codes as string[]) ?? []).join(", ") || "—"}</dd>
+          <dt>CPT</dt><dd className="text-slate-800">{((fields.cpt_codes as { code: string }[]) ?? []).map((c) => c.code).join(", ") || "—"}</dd>
+          {(claims.policy_brief?.medications ?? []).length > 0 && <>
+            <dt>Medications</dt><dd className="text-slate-800">{claims.policy_brief!.medications.join(", ")}</dd>
+          </>}
+        </dl>
+      )}
+      {full && claims?.policy_brief && <p className="text-[11px] text-slate-500">→ Brief sent to the policy agent</p>}
+    </AgentCard>
+  );
+  const policyCard = (
+    <AgentCard {...props("policy")}>
+      {full && policy && !policy.error && (
+        <>
+          <p className="text-[11px] text-slate-600">{policy.plan ?? "plan unknown"} · CPT {policy.cpt_codes_checked.join(", ")}</p>
+          {policy.exclusions.map((e) => <p key={e} className="text-[11px] text-rose-700">✕ {e}</p>)}
+          {(policy.notes ?? []).map((n) => <p key={n} className="text-[11px] text-amber-700">! {n}</p>)}
+          <p className="text-[11px] italic text-slate-500">“{policy.policy_clause}”</p>
+        </>
+      )}
+    </AgentCard>
+  );
+  const fraudCard = (
+    <AgentCard {...props("fraud")}>
+      {full && fraud && !fraud.error && (
+        <>
+          <div className="h-1.5 overflow-hidden rounded-full bg-slate-100" role="meter" aria-valuenow={fraud.fraud_score} aria-valuemin={0} aria-valuemax={1} aria-label="Fraud score">
+            <div className={`h-full ${fraud.fraud_score >= 0.3 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.max(3, fraud.fraud_score * 100)}%` }} />
+          </div>
+          {fraud.anomalies.map((a) => (
+            <p key={a.type} className="text-[11px] text-amber-800"><span className="font-semibold">{a.type}</span> ({a.severity}): {a.detail}</p>
+          ))}
+        </>
+      )}
+    </AgentCard>
+  );
+
+  // ---- the graph: the same nodes and edges as backend app/claim/graph.py ----
+  const realHold = st.ingest_hold;
+  const hold: Stage = realHold ?? {
+    key: "ingest_hold", label: "Hold (person)", note: "only if a page is unknown, blurry or unreadable",
+    state: ["waiting", "running"].includes(st.plan.state) ? "waiting" : "skipped",
+  };
+  const order = progress.stages.map((x) => x.key);
+  const holdAfterClassify = !!realHold && order.indexOf("ingest_hold") < order.indexOf("extract");
+  const holdAfterExtract = !!realHold && !holdAfterClassify;
+  const human = st.human_review;
+  const started: StageState = st.classify.state === "waiting" && !progress.running ? "waiting" : "done";
+  const ended: StageState = human.state === "done" || (st.decide.state === "done" && human.state === "skipped") ? "done" : "waiting";
+  const decision = (st.decide.detail?.decision as string | undefined) ?? result.decision?.decision;
+
+  const edges: GraphEdge[] = [
+    { from: "start", to: "classify", kind: edgeKind(started, st.classify.state) },
+    { from: "classify", to: "classify", kind: edgeKind(st.classify.state, st.classify.state), label: "each page" },
+    { from: "classify", to: "extract", kind: holdAfterClassify ? "unused" : edgeKind(st.classify.state, st.extract.state) },
+    { from: "classify", to: "hold", conditional: true, label: "unknown · blurry", offset: -10,
+      kind: holdAfterClassify ? edgeKind(st.classify.state, hold.state) : "unused" },
+    { from: "hold", to: "extract", conditional: true, offset: 10, kind: holdAfterClassify ? edgeKind(hold.state, st.extract.state) : "unused" },
+    { from: "extract", to: "extract", kind: edgeKind(st.extract.state, st.extract.state), label: "each page" },
+    { from: "extract", to: "hold", conditional: true, label: "unreadable", offset: -10,
+      kind: holdAfterExtract ? edgeKind(st.extract.state, hold.state) : "unused" },
+    { from: "hold", to: "plan", conditional: true, kind: holdAfterExtract ? edgeKind(hold.state, st.plan.state) : "unused" },
+    { from: "extract", to: "plan", kind: holdAfterExtract ? "unused" : edgeKind(st.extract.state, st.plan.state) },
+    { from: "plan", to: "kyc", conditional: true, kind: edgeKind(st.plan.state, st.kyc.state) },
+    { from: "plan", to: "claims", conditional: true, kind: edgeKind(st.plan.state, st.claims.state) },
+    { from: "claims", to: "policy", conditional: true, label: "claim form", kind: edgeKind(st.claims.state, st.policy.state) },
+    { from: "claims", to: "fraud", conditional: true, label: "no claim form",
+      kind: st.policy.state === "skipped" ? edgeKind(st.claims.state, st.fraud.state) : "unused" },
+    { from: "kyc", to: "fraud", kind: edgeKind(st.kyc.state, st.fraud.state) },
+    { from: "policy", to: "fraud", kind: edgeKind(st.policy.state, st.fraud.state) },
+    { from: "fraud", to: "decide", kind: edgeKind(st.fraud.state, st.decide.state) },
+    { from: "decide", to: "end", conditional: true, kind: ["done", "hold"].includes(human.state) ? "unused" : edgeKind(st.decide.state, ended) },
+    { from: "decide", to: "human", conditional: true, label: "ESCALATE", kind: edgeKind(st.decide.state, human.state) },
+    { from: "human", to: "end", kind: edgeKind(human.state, ended) },
+  ];
+
+  const nodes: GraphNode[] = [
+    { id: "start", col: "1", row: 2, content: <Terminal label="START" state={started} /> },
+    { id: "classify", col: "2", row: 2, fill: true, content: pageCard("classify") },
+    { id: "hold", col: "2 / span 2", row: 1, content: <FlowNode stage={hold} title="Ingest hold" sub="a person: continue, stop or re-upload" human wide /> },
+    { id: "extract", col: "3", row: 2, fill: true, content: pageCard("extract") },
+    { id: "plan", col: "4", row: 2, content: (
+      <FlowNode stage={st.plan} title="Plan" compact
+        sub={st.plan.state === "done" ? (((st.plan.detail?.agents as string[]) ?? []).join(", ") || "no agents") : undefined} />
+    ) },
+    { id: "kyc", col: "5", row: 1, fill: true, content: kycCard },
+    { id: "claims", col: "5", row: 2, fill: true, content: claimsCard },
+    { id: "policy", col: "5", row: 3, fill: true, content: policyCard },
+    { id: "fraud", col: "6", row: 2, fill: true, content: fraudCard },
+    { id: "decide", col: "7", row: 2, content: (
+      <FlowNode stage={st.decide} title="Orchestrator" sub="decides the claim">
+        {decision && st.decide.state === "done" && <span className="mt-1 block"><Badge value={decision} /></span>}
+      </FlowNode>
+    ) },
+    { id: "human", col: "7", row: 3, content: <FlowNode stage={human} title="Human review" sub={human.note} human /> },
+    { id: "end", col: "8", row: 2, content: <Terminal label="END" state={ended} /> },
+  ];
+
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-      {pageCard(0)}
-      {pageCard(1)}
-      {pageCard(2)}
-      <AgentCard {...props(3, "kyc")}>
-        {full && kyc?.member && <p className="text-[11px] text-slate-600">Member {kyc.member.member_id} · {kyc.member.full_name}</p>}
-        {full && (
-          <ul className="space-y-1 text-[11px]">
-            {(kyc?.checks ?? []).map((c, i) => (
-              <li key={i} className={c.passed === false ? "text-rose-700" : c.passed ? "text-slate-600" : "text-amber-700"}>
-                {c.passed === false ? "✕" : c.passed ? "✓" : "?"} {c.detail}
-              </li>
-            ))}
-          </ul>
-        )}
-      </AgentCard>
-      <AgentCard {...props(4, "claims")}>
-        {full && claims?.claim && (
-          <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px] text-slate-600">
-            <dt>Claim no.</dt><dd className="text-slate-800">{String(fields.claim_number ?? "—")}</dd>
-            <dt>Amount</dt><dd className="text-slate-800">{fields.claim_amount != null ? `$${Number(fields.claim_amount).toLocaleString()}` : "—"}</dd>
-            <dt>Service</dt><dd className="text-slate-800">{String(fields.service_date ?? "—")}</dd>
-            <dt>ICD-10</dt><dd className="text-slate-800">{((fields.icd10_codes as string[]) ?? []).join(", ") || "—"}</dd>
-            <dt>CPT</dt><dd className="text-slate-800">{((fields.cpt_codes as { code: string }[]) ?? []).map((c) => c.code).join(", ") || "—"}</dd>
-          </dl>
-        )}
-        {full && (claims?.schema_errors ?? []).map((e) => <p key={e} className="text-[11px] text-rose-700">✕ {e}</p>)}
-      </AgentCard>
-      <AgentCard {...props(5, "policy")}>
-        {full && policy && !policy.error && (
-          <>
-            <p className="text-[11px] text-slate-600">{policy.plan ?? "plan unknown"} · CPT {policy.cpt_codes_checked.join(", ")}</p>
-            {policy.exclusions.map((e) => <p key={e} className="text-[11px] text-rose-700">✕ {e}</p>)}
-            {(policy.notes ?? []).map((n) => <p key={n} className="text-[11px] text-amber-700">! {n}</p>)}
-            <p className="text-[11px] italic text-slate-500">“{policy.policy_clause}”</p>
-          </>
-        )}
-      </AgentCard>
-      <AgentCard {...props(6, "fraud")}>
-        {full && fraud && !fraud.error && (
-          <>
-            <div className="h-1.5 overflow-hidden rounded-full bg-slate-100" role="meter" aria-valuenow={fraud.fraud_score} aria-valuemin={0} aria-valuemax={1} aria-label="Fraud score">
-              <div className={`h-full ${fraud.fraud_score >= 0.3 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.max(3, fraud.fraud_score * 100)}%` }} />
-            </div>
-            {fraud.anomalies.map((a) => (
-              <p key={a.type} className="text-[11px] text-amber-800"><span className="font-semibold">{a.type}</span> ({a.severity}): {a.detail}</p>
-            ))}
-          </>
-        )}
-      </AgentCard>
+    <WorkflowGraph nodes={nodes} edges={edges} label="Claim agent workflow" title="Agent workflow"
+      minWidth={1190} columns="48px minmax(180px,1fr) minmax(180px,1fr) 60px minmax(180px,1fr) minmax(180px,1fr) 116px 48px" />
+  );
+}
+
+// Edge state from the two ends: taken (green), running into the target (blue, moving),
+// waiting on a person (orange), failed (red), not reached yet (grey), or a path not taken.
+function edgeKind(from: StageState, to: StageState): EdgeKind {
+  if (from === "skipped" || to === "skipped") return "unused";
+  if (from !== "done" && from !== "error") return "idle";
+  if (to === "running") return "active";
+  if (to === "hold") return "hold";
+  if (to === "error") return "error";
+  return to === "done" ? "taken" : "idle";
+}
+
+function Terminal({ label, state }: { label: string; state: StageState }) {
+  return (
+    <span className={`mt-2 grid h-11 w-11 place-items-center rounded-full text-[9px] font-bold tracking-wider ring-4 ${
+      state === "done" ? "bg-slate-900 text-white ring-emerald-100" : "bg-slate-200 text-slate-500 ring-slate-100"}`}>
+      {label}
+    </span>
+  );
+}
+
+// A small graph node for steps without an agent card: plan, the orchestrator, the two human steps.
+function FlowNode({ stage, title, sub, human, compact, wide, children }: {
+  stage: Stage; title: string; sub?: string; human?: boolean; compact?: boolean; wide?: boolean; children?: React.ReactNode;
+}) {
+  const tone = stage.state === "done" ? "bg-emerald-50 ring-emerald-300 text-emerald-900"
+    : stage.state === "error" ? "bg-rose-50 ring-rose-300 text-rose-900"
+    : stage.state === "running" ? "bg-sky-50 ring-2 ring-sky-400 text-sky-900"
+    : stage.state === "hold" ? "bg-orange-50 ring-2 ring-orange-400 text-orange-900"
+    : "bg-white ring-slate-200 text-slate-500";
+  const dashed = stage.state === "waiting" || stage.state === "skipped";
+  return (
+    <div className={`rounded-xl px-3 py-2 text-center ring-1 ${tone} ${dashed ? "border border-dashed border-slate-300 ring-0" : ""} ${
+      stage.state === "skipped" ? "opacity-60" : ""} ${compact ? "w-[60px] px-1.5" : wide ? "w-[200px]" : "w-[116px]"}`}
+      title={`${title}: ${stage.note}`}>
+      <p className="flex items-center justify-center gap-1 text-xs font-semibold">
+        {human && <span aria-hidden>👤</span>}
+        {stage.state === "running" && <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />}
+        {title}
+      </p>
+      <p className="mt-0.5 text-[10px] leading-tight opacity-80">
+        {stage.state === "done" && stage.durationMs != null ? fmtMs(stage.durationMs) : stage.state === "skipped" ? "not taken" : stage.state}
+      </p>
+      {sub && !compact && <p className="mt-0.5 truncate text-[10px] leading-tight opacity-70" title={sub}>{sub}</p>}
+      {sub && compact && <p className="mt-0.5 break-words text-[9px] leading-tight opacity-70">{sub}</p>}
+      {children}
     </div>
   );
 }
@@ -260,16 +441,38 @@ function auditText(e: AuditEvent): string {
     ?? (d.documents !== undefined ? `${d.documents} document(s)` : "")) as string;
 }
 
-function AuditLog({ events }: { events: AuditEvent[] }) {
+// The claim's audit log: newest first, searchable (?aq=) and paged (?ap=). It opens by itself
+// while a search or a later page is shown.
+function AuditLog({ events, claimId, q, page }: { events: AuditEvent[]; claimId: string; q?: string; page: number }) {
+  const term = (q ?? "").trim().toLowerCase();
+  const matching = [...events].reverse().filter((e) => !term
+    || [e.actor, e.event, auditText(e), JSON.stringify(e.detail ?? {})].some((t) => t.toLowerCase().includes(term)));
+  const { rows, hasNext } = slicePage(matching, page);
+  const params = { aq: q };
   return (
-    <section className="card p-5" aria-labelledby="audit-h">
-      <div className="flex items-baseline justify-between">
-        <h2 id="audit-h" className="text-sm font-semibold text-slate-900">Audit log · investigation notes</h2>
-        <span className="text-xs text-slate-400">{events.length} events · UTC timestamps</span>
+    <details id="audit" className="card group p-5" open={Boolean(term) || page > 1}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+        <span>
+          <span className="block text-sm font-semibold text-slate-900">Audit log · investigation notes</span>
+          <span className="block text-xs text-slate-400">{term ? `${matching.length} of ${events.length}` : events.length} events · newest first · UTC timestamps</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-brand-700 ring-1 ring-brand-200 hover:bg-brand-50">
+          <span className="group-open:hidden">Show logs</span><span className="hidden group-open:inline">Hide logs</span>
+          <svg viewBox="0 0 24 24" className="h-4 w-4 transition group-open:rotate-180" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+          </svg>
+        </span>
+      </summary>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-slate-500">Each agent row says what it worked on, how long it took and what it returned. Open a row for the full returned values.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <ClaimDownloads claimId={claimId} />
+          <SearchBox path={`/bundles/${claimId}`} params={params} name="aq" placeholder="Search agent, event or detail" hash="audit" />
+        </div>
       </div>
-      <p className="mt-1 text-xs text-slate-500">Each agent row says what it worked on, how long it took and what it returned. Open a row for the full returned values.</p>
+      {rows.length === 0 && <p className="mt-4 text-center text-xs text-slate-500">No events match &ldquo;{q}&rdquo;.</p>}
       <ol className="mt-4 space-y-0">
-        {events.map((e) => {
+        {rows.map((e) => {                               // newest first; the progress view reads them oldest first
           const d = e.detail ?? {};
           const human = !AGENT_ACTORS.includes(e.actor);
           const started = e.event === "agent_started";
@@ -298,12 +501,17 @@ function AuditLog({ events }: { events: AuditEvent[] }) {
           );
         })}
       </ol>
-    </section>
+      <Pager path={`/bundles/${claimId}`} params={params} page={page} hasNext={hasNext} shown={rows.length}
+        total={matching.length} pageKey="ap" hash="audit" />
+    </details>
   );
 }
 
-export default async function ClaimPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ClaimPage({ params, searchParams }: {
+  params: Promise<{ id: string }>; searchParams: Promise<{ aq?: string; ap?: string }>;
+}) {
   const { id } = await params;
+  const sp = await searchParams;
   let claim: ClaimBundle;
   try {
     claim = await serverApi<ClaimBundle>(`/api/claim-bundles/${id}`);
@@ -325,25 +533,22 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
   const awaitingHuman = status === "NEEDS_REVIEW" && !!result.awaiting_human;
   const onHold = status === "ON_HOLD";
   const progress = claimProgress(audit, claim.documents, running, awaitingHuman || (onHold && result.awaiting === "human_review"),
-                                 status === "REVIEWED", onHold);
+                                 !!ov && ov.decision !== "ESCALATE" && (status === "APPROVED" || status === "REJECTED" || status === "REVIEWED"), onHold);
   const current = progress.stages.filter((s) => s.state === "running");
-  const lastStart = audit.map((e) => e.event).lastIndexOf("claim_started");
-  const stopping = running && audit.slice(Math.max(0, lastStart)).some((e) => e.event === "stop_requested");
   const longStep = current.find(isLong);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <AutoRefresh active={running} />
-      <nav className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-        <Link href="/bundles" className="hover:text-brand-700">Claims</Link><span>/</span>
-        <span className="min-w-0 truncate text-slate-800">{claim.title}</span>
-      </nav>
 
       <div className="card overflow-hidden">
-        <div className="flex flex-wrap items-start justify-between gap-4 p-6">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3">
           <div className="min-w-0">
-            <h1 className="truncate text-2xl font-semibold tracking-tight text-slate-900">{claim.title}</h1>
-            <p className="mt-1 text-sm text-slate-500">
+            <h1 className="flex min-w-0 items-baseline gap-2 text-xl font-semibold tracking-tight text-slate-900">
+              <Link href="/bundles" className="shrink-0 text-sm font-normal text-slate-400 hover:text-brand-700">Claims /</Link>
+              <span className="truncate">{claim.title}</span>
+            </h1>
+            <p className="mt-0.5 text-xs text-slate-500">
               {patient ? <>Patient <Link href={`/patients/${patient.patient_id}`} className="font-medium text-brand-700 hover:underline">{patient.full_name}</Link> · </> : null}
               {claim.documents.length} document(s) · submitted by {claim.created_by} on {fmt(claim.created_at)}
             </p>
@@ -356,12 +561,12 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
         </div>
 
         {running && (
-          <div className="mx-6 mb-6 rounded-xl border border-sky-200 bg-sky-50/70 px-4 py-3 text-sky-900" role="status">
+          <div className="mx-5 mb-4 rounded-xl border border-sky-200 bg-sky-50/70 px-4 py-3 text-sky-900" role="status">
             <p className="flex items-center gap-2 text-sm font-semibold">
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
               {current.length === 0
                 ? (status === "QUEUED" ? "Pending: waiting to start" : "Starting…")
-                : current.map((s) => ["preprocess", "classify", "extract"].includes(s.key)
+                : current.map((s) => ["classify", "extract"].includes(s.key)
                   ? `${s.label} agent: ${s.note} · ${elapsed(s.startedAt)}`
                   : `${s.label} agent running · ${elapsed(s.startedAt)}`).join(" · ")}
             </p>
@@ -370,25 +575,33 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
                 In progress: the {longStep.label.toLowerCase()} step has run over {LONG_STEP_S}s. It keeps working in the background; you can leave this page. Only one claim runs at a time, so new uploads wait until it finishes.
               </p>
             ) : (
-              <p className="mt-0.5 text-xs">Each page goes through preprocess → classify → extract, one page at a time. If every page is read, KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. If a page fails or is unknown, the claim goes on hold for a person. This page updates every few seconds.</p>
+              <p className="mt-0.5 text-xs">Every page is classified first. If a page is unknown or blurry, the claim stops on hold for a person before anything is read. Then each page is preprocessed and extracted in one step, one page at a time; KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. This page updates every few seconds.</p>
             )}
-            <div className="mt-2"><StopButton claimId={claim.bundle_id} stopping={stopping} /></div>
+            <div className="mt-2"><StopButton claimId={claim.bundle_id} /></div>
           </div>
         )}
-        {result.error && (
-          <div className={`mx-6 mb-6 rounded-xl border px-4 py-3 ${TONE.REJECT}`} role="alert">
+        {result.error && !running && (
+          <div className={`mx-5 mb-4 rounded-xl border px-4 py-2.5 ${TONE.REJECT}`} role="alert">
             <p className="text-sm font-semibold">Processing failed</p><p className="mt-0.5 text-xs">{result.error}</p>
           </div>
         )}
         {out && !running && (
-          <div className={`mx-6 mb-6 rounded-xl border px-4 py-3 ${TONE[out.decision]}`}>
+          <div className={`mx-5 mb-4 rounded-xl border px-4 py-2.5 ${TONE[out.decision]}`}>
             <p className="text-sm font-semibold">Orchestrator: {out.decision} <span className="font-normal opacity-80">· confidence {pct(out.confidence)}</span></p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">{out.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+            <ul className="mt-1 flex flex-wrap gap-x-5 gap-y-0.5 text-xs">{out.reasons.map((r) => <li key={r}>• {r}</li>)}</ul>
+            {awaitingHuman && (
+              <p className="mt-1.5 border-t border-black/10 pt-1.5 text-xs font-medium" role="status">
+                ⏸ Paused at the human-review checkpoint. Record a decision in <span className="font-semibold">Human review</span> (bottom right) to resume it from exactly this point.
+              </p>
+            )}
           </div>
         )}
         {ov && (
-          <div className="mx-6 mb-6 rounded-xl border border-brand-200 bg-brand-50/70 px-4 py-3 text-brand-900">
-            <p className="text-sm font-semibold">Reviewer decision: {ov.decision} <span className="font-normal opacity-80">(was {ov.original_decision ?? "—"})</span></p>
+          <div className="mx-5 mb-4 rounded-xl border border-brand-200 bg-brand-50/70 px-4 py-2.5 text-brand-900">
+            <p className="text-sm font-semibold">
+              {ov.decision === "ESCALATE" ? "Reviewer kept it escalated" : `Reviewer decision: ${ov.decision}`}{" "}
+              <span className="font-normal opacity-80">(agents: {ov.original_decision ?? "—"}) · status now {status.replaceAll("_", " ").toLowerCase()}</span>
+            </p>
             <p className="mt-0.5 text-xs">“{ov.note}” · {ov.reviewer}, {fmt(ov.reviewed_at)}</p>
           </div>
         )}
@@ -400,10 +613,17 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
       {status === "STOPPED" && (
         <div className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-800" role="status">
           <p className="text-sm font-semibold">Stopped by a person</p>
-          <p className="mt-0.5 text-xs">No further agents run. Re-run it or re-upload pages from Human review to start again.</p>
+          <p className="mt-0.5 text-xs">
+            {result.resume?.from === "ON_HOLD" || result.resume?.from === "NEEDS_REVIEW"
+              ? "Nothing is running. Resume puts it back to waiting for a person."
+              : result.resume?.thread_id
+                ? "Nothing is running. Resume continues from the last finished step; pages already read are not read again."
+                : "Nothing is running. Resume runs it again from the start (pages already read come from the cache)."}
+          </p>
+          <div className="mt-2"><ResumeButton claimId={claim.bundle_id} /></div>
         </div>
       )}
-      {awaitingHuman && (
+      {awaitingHuman && !out && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900" role="status">
           <p className="text-sm font-semibold">Paused for human review</p>
           <p className="mt-0.5 text-xs">The run is stopped at the human_review checkpoint (LangGraph interrupt). Recording a decision below resumes it from exactly this point.</p>
@@ -412,68 +632,66 @@ export default async function ClaimPage({ params }: { params: Promise<{ id: stri
       {(running || out || onHold || status === "STOPPED") && <Stepper progress={progress} />}
       {(running || out || onHold || status === "STOPPED") && <Detail result={result} progress={progress} />}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="pb-20">
         <div className="space-y-6">
-          <section aria-label="Documents" className="space-y-3">
-            <h2 className="text-sm font-semibold text-slate-900">Documents</h2>
-            <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {claim.documents.map((d) => (
-                <li key={d.case_id} className="card flex gap-3 p-3">
-                  <a href={`/api/bff/cases/${d.case_id}/document`} target="_blank" rel="noreferrer"
-                    className="relative h-20 w-16 shrink-0 overflow-hidden rounded-md bg-slate-100 ring-1 ring-slate-200">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={`/api/bff/cases/${d.case_id}/document`} alt={`Preview of ${d.file_name}`} loading="lazy" className="h-full w-full object-cover" />
-                  </a>
-                  <span className="flex min-w-0 flex-col text-xs">
-                    <span className="truncate font-semibold text-slate-900" title={d.file_name}>{d.file_name}</span>
-                    <span className="capitalize text-slate-500">{d.doc_type?.replaceAll("_", " ").toLowerCase() ?? "not read yet"}</span>
-                    <span className="mt-auto flex flex-wrap items-center gap-2">
-                      <Badge value={d.status} />
-                      {!running && (d.doc_type === "UNKNOWN" || d.status === "UNREADABLE") && (
-                        <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name} />
-                      )}
-                    </span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-          {(result.documents ?? []).some((d) => d.raw_text) && (
-            <section className="card p-5" aria-labelledby="text-h">
-              <div className="flex items-baseline justify-between">
-                <h2 id="text-h" className="text-sm font-semibold text-slate-900">Page text (preprocessor)</h2>
-                <span className="text-xs text-slate-400">what the vision model read from each image</span>
-              </div>
-              <div className="mt-3 space-y-2">
-                {(result.documents ?? []).map((d) => {
-                  const row = claim.documents.find((c) => c.case_id === d.doc_id);
-                  return (
-                    <details key={d.doc_id} className="group rounded-xl ring-1 ring-slate-200">
-                      <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs">
-                        <span className="truncate font-medium text-slate-800">{d.file_name}</span>
-                        <span className="shrink-0 text-slate-500">
-                          {d.doc_type.replaceAll("_", " ").toLowerCase()} · {d.image_quality ?? "clear"} · {(d.raw_text ?? "").length} chars
+          <section className="card p-5" aria-labelledby="docs-h">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 id="docs-h" className="text-sm font-semibold text-slate-900">Documents</h2>
+              <span className="text-xs text-slate-400">in processing order: ID → claim form → discharge → prescription → policy amendment · open a row for the page text</span>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {claim.documents.map((d, i) => {
+                const read = (result.documents ?? []).find((r) => r.doc_id === d.case_id);
+                const src = `/api/bff/cases/${d.case_id}/document`;
+                const issue = d.doc_type === "UNKNOWN" || d.status === "UNREADABLE" || d.status === "BLURRY" || Boolean(read?.error);
+                const facts = [
+                  (read?.doc_type ?? d.doc_type)?.replaceAll("_", " ").toLowerCase() ?? "not classified yet",
+                  read?.image_quality,
+                  read?.raw_text ? `${read.raw_text.length.toLocaleString()} chars` : null,
+                ].filter(Boolean).join(" · ");
+                return (
+                  <li key={d.case_id}>
+                    <details className={`group rounded-xl ring-1 ${issue ? "ring-orange-300" : "ring-slate-200"}`}>
+                      <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-2 text-xs">
+                        <span className="w-4 shrink-0 text-right tabular-nums text-slate-400">{i + 1}.</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium text-slate-900" title={d.file_name}>{d.file_name}</span>
+                          <span className="block truncate capitalize text-slate-500">{facts}</span>
                         </span>
+                        <Badge value={d.status} />
+                        <a href={src} target="_blank" rel="noreferrer" title={`View ${d.file_name}`} aria-label={`View ${d.file_name}`}
+                          className="rounded-md p-1.5 text-slate-500 ring-1 ring-slate-200 hover:bg-slate-50 hover:text-brand-700">
+                          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7S2.5 12 2.5 12z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                        </a>
+                        {!running && issue && (
+                          <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name} />
+                        )}
+                        <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+                        </svg>
                       </summary>
                       <div className="grid gap-3 border-t border-slate-100 p-3 md:grid-cols-2">
-                        {row && (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={`/api/bff/cases/${row.case_id}/document`} alt={`Scan of ${d.file_name}`} loading="lazy"
-                            className="max-h-96 w-full rounded-lg object-contain ring-1 ring-slate-200" />
-                        )}
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={src} alt={`Scan of ${d.file_name}`} loading="lazy"
+                          className="max-h-96 w-full rounded-lg object-contain ring-1 ring-slate-200" />
                         <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-700">
-                          {d.raw_text || (d.error ?? "no text")}
+                          {read?.raw_text || read?.error || "Not read yet."}
                         </pre>
                       </div>
                     </details>
-                  );
-                })}
-              </div>
-            </section>
-          )}
-          <AuditLog events={audit} />
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+          <AuditLog events={audit} claimId={claim.bundle_id} q={sp.aq} page={pageOf(sp, "ap")} />
         </div>
-        {!running && <ClaimReview claimId={claim.bundle_id} docs={result.documents ?? []} busyClaim={running} />}
+        {!running && <ClaimReview claimId={claim.bundle_id} busyClaim={running}
+          docs={[...(result.documents ?? [])].sort((a, b) => claim.documents.findIndex((c) => c.case_id === a.doc_id) - claim.documents.findIndex((c) => c.case_id === b.doc_id))}
+          needsPerson={status === "NEEDS_REVIEW" || onHold} agentDecision={out?.decision ?? claim.decision} />}
       </div>
     </div>
   );

@@ -29,30 +29,30 @@ export default function LoginIntro({ children }: { children: ReactNode }) {
       {phase !== "done" && (
         <div
           aria-hidden="true"
-          className={`fixed inset-0 z-50 grid place-items-center overflow-hidden bg-slate-950 px-6 transition-opacity duration-500 ${
+          className={`fixed inset-0 z-50 grid place-items-center overflow-hidden bg-slate-50 px-6 transition-opacity duration-500 ${
             phase === "leaving" ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >
           <div className="pointer-events-none absolute inset-0">
-            <div className="absolute -left-24 -top-24 h-72 w-72 animate-blob rounded-full bg-brand-600/40 blur-3xl" />
-            <div className="absolute -bottom-32 -right-16 h-80 w-80 animate-blob rounded-full bg-indigo-500/30 blur-3xl [animation-delay:-5s]" />
+            <div className="absolute -left-24 -top-24 h-72 w-72 animate-blob rounded-full bg-brand-100 blur-3xl" />
+            <div className="absolute -bottom-32 -right-16 h-80 w-80 animate-blob rounded-full bg-indigo-100 blur-3xl [animation-delay:-5s]" />
           </div>
 
           <div className="relative flex flex-col items-center text-center">
             <div className="relative grid h-36 w-36 place-items-center">
-              <span className="absolute inset-0 rounded-full bg-brand-500/30 animate-ripple" />
-              <span className="absolute inset-0 rounded-full bg-brand-500/30 animate-ripple [animation-delay:1.2s]" />
-              <LoginHero className="relative h-28 w-28 drop-shadow-[0_0_24px_rgba(91,140,255,0.6)]" />
+              <span className="absolute inset-0 rounded-full bg-brand-500/15 animate-ripple" />
+              <span className="absolute inset-0 rounded-full bg-brand-500/15 animate-ripple [animation-delay:1.2s]" />
+              <LoginHero className="relative h-28 w-28 drop-shadow-[0_8px_16px_rgba(39,83,224,0.25)]" />
             </div>
 
-            <h1 className="mt-6 animate-fade-up text-3xl font-bold tracking-tight text-white">
+            <h1 className="mt-6 animate-fade-up text-3xl font-bold tracking-tight text-slate-900">
               MediShield
             </h1>
-            <p className="mt-2 animate-fade-in text-sm text-slate-400 [animation-delay:0.3s]">
+            <p className="mt-2 animate-fade-in text-sm text-slate-500 [animation-delay:0.3s]">
               Securing claim decisions
             </p>
 
-            <div className="mt-8 h-1 w-44 overflow-hidden rounded-full bg-white/10">
+            <div className="mt-8 h-1 w-44 overflow-hidden rounded-full bg-slate-200">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-brand-500 to-indigo-500"
                 style={{ animation: `progress ${SPLASH_MS}ms ease-in-out both` }}

@@ -2,7 +2,9 @@ import Link from "next/link";
 import AutoRefresh from "@/components/AutoRefresh";
 import Badge from "@/components/Badge";
 import KpiCard from "@/components/KpiCard";
+import Pager from "@/components/Pager";
 import { CaseSummary, DashboardStats } from "@/lib/api";
+import { pageOf, slicePage } from "@/lib/paging";
 import { serverApi } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +28,12 @@ function rowAccent(c: CaseSummary): string | null {
   return null;
 }
 
+// A page uploaded as part of a claim opens that claim (agent run, documents, audit log);
+// a standalone upload has no claim, so it opens its own document page.
+function openHref(c: CaseSummary): string {
+  return c.bundle_id ? `/bundles/${c.bundle_id}` : `/cases/${c.case_id}`;
+}
+
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
@@ -42,8 +50,10 @@ function Confidence({ value }: { value: number | null }) {
   );
 }
 
-export default async function CasesPage({ searchParams }: { searchParams: Promise<{ tab?: string; q?: string }> }) {
-  const { tab, q } = await searchParams;
+export default async function CasesPage({ searchParams }: { searchParams: Promise<{ tab?: string; q?: string; page?: string }> }) {
+  const sp = await searchParams;
+  const { tab, q } = sp;
+  const page = pageOf(sp);
   const term = (q ?? "").trim().toLowerCase();
   const active: TabKey = TABS.some((t) => t.key === tab) ? (tab as TabKey) : "ESCALATE";
   const [all, stats] = await Promise.all([
@@ -51,13 +61,13 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
     serverApi<DashboardStats>("/api/dashboard/stats"),
   ]);
   const tabDef = TABS.find((t) => t.key === active)!;
-  const rows = all
+  const matching = all
     .filter(tabDef.match)
     .filter((c) => !term || c.file_name.toLowerCase().includes(term) || c.case_id.startsWith(term));
+  const { rows, hasNext, total } = slicePage(matching, page);       // the tab counts need every row; show one page
   const count = (t: (typeof TABS)[number]) => all.filter(t.match).length;
   const busy = all.some((c) => c.status === "PROCESSING");
   const pct = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}%`);
-  const decisionHref = (key: TabKey) => `/?tab=${key}`;
 
   return (
     <div className="space-y-6">
@@ -94,19 +104,19 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <KpiCard delay={0} icon="folder" label="Total cases" value={String(stats.total)}
-          hint={`${stats.processing} processing · ${stats.failed} failed`} href={decisionHref("ALL")} active={active === "ALL"} />
+          hint={`${stats.documents ?? 0} documents · ${stats.processing} processing · ${stats.failed} failed`} href="/bundles" />
         <KpiCard delay={40} icon="calendar" tone="info" label="Received today" value={String(stats.today)}
-          hint={stats.today === 1 ? "1 document" : `${stats.today} documents`} />
+          hint={`${stats.today === 1 ? "1 case" : `${stats.today} cases`} · ${stats.documents_today ?? 0} documents`} />
         <KpiCard delay={80} icon="check" tone="good" label="Approval rate" value={pct(stats.approval_rate)}
           meter={stats.approval_rate == null ? null : stats.approval_rate * 100}
           hint={`of ${stats.decided} decided cases`} />
         <KpiCard delay={120} icon="alert" tone="warning" label="Needs review" value={String(stats.escalated)}
-          hint={stats.escalated > 0 ? "Waiting for a person · open the list" : "Nothing waiting"}
-          href={decisionHref("ESCALATE")} active={active === "ESCALATE"} highlight={stats.escalated > 0} />
+          hint={stats.escalated > 0 ? "Waiting for a person · open the queue" : "Nothing waiting"}
+          href="/review" highlight={stats.escalated > 0} />
         <KpiCard delay={160} icon="check" tone="good" label="Approved" value={String(stats.approved)}
-          hint="All applicable checks passed" href={decisionHref("APPROVE")} active={active === "APPROVE"} />
+          hint="By the agents or a reviewer" href="/approved" />
         <KpiCard delay={200} icon="x" tone="critical" label="Rejected" value={String(stats.rejected)}
-          hint="Failed KYC, schema or coverage" href={decisionHref("REJECT")} active={active === "REJECT"} />
+          hint="Not a member, or not covered" href="/rejected" />
         <KpiCard delay={240} icon="gauge" tone="info" label="Avg. confidence" value={pct(stats.avg_confidence)}
           meter={stats.avg_confidence == null ? null : stats.avg_confidence * 100}
           hint={`${stats.reviewed} reviewed by a person`} />
@@ -130,7 +140,7 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
 
         <div className="flex items-center justify-between px-4 py-3 text-xs text-slate-500 sm:px-6">
           <span>{tabDef.hint}</span>
-          <span className="tabular-nums">{rows.length} shown</span>
+          <span className="tabular-nums">{total} {total === 1 ? "case" : "cases"} · page {page}</span>
         </div>
 
         {rows.length === 0 ? (
@@ -152,7 +162,7 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
               {rows.map((c, i) => (
                 <li key={c.case_id} className="relative animate-fade-up px-4 py-4" style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}>
                   {rowAccent(c) && <span className={`absolute inset-y-3 left-0 w-1 rounded-r-full ${rowAccent(c)}`} aria-hidden />}
-                  <Link href={`/cases/${c.case_id}`} className="block active:bg-slate-50">
+                  <Link href={openHref(c)} className="block active:bg-slate-50">
                     <div className="flex items-start justify-between gap-3">
                       <p className="min-w-0 truncate text-sm font-semibold text-slate-900">{c.file_name}</p>
                       <Badge value={c.decision ?? c.status} />
@@ -186,7 +196,7 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
                       className="animate-fade-up transition-colors duration-150 hover:bg-brand-50/50">
                       <td className="td relative max-w-xs truncate font-medium text-slate-900">
                         {rowAccent(c) && <span className={`absolute inset-y-2 left-0 w-1 rounded-r-full ${rowAccent(c)}`} aria-hidden />}
-                        <Link href={`/cases/${c.case_id}`} className="hover:text-brand-700 hover:underline">{c.file_name}</Link>
+                        <Link href={openHref(c)} className="hover:text-brand-700 hover:underline">{c.file_name}</Link>
                       </td>
                       <td className="td capitalize text-slate-600">{c.doc_type?.replaceAll("_", " ").toLowerCase() ?? "—"}</td>
                       <td className="td"><Badge value={c.decision} /></td>
@@ -194,13 +204,15 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
                       <td className="td text-right"><Confidence value={c.confidence} /></td>
                       <td className="td whitespace-nowrap text-slate-500">{fmtDate(c.created_at)}</td>
                       <td className="td text-right">
-                        <Link href={`/cases/${c.case_id}`} className="btn-ghost text-brand-700">Open <span aria-hidden>→</span></Link>
+                        <Link href={openHref(c)} className="btn-ghost text-brand-700">Open <span aria-hidden>→</span></Link>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            <Pager path="/" params={{ tab: active, q }} page={page} hasNext={hasNext} shown={rows.length} total={total}
+              className="border-t border-slate-100 px-4 pb-3 sm:px-6" />
           </>
         )}
       </div>

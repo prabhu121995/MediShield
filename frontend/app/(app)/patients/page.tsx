@@ -1,6 +1,9 @@
 import Link from "next/link";
 import PatientForm from "./PatientForm";
+import Pager from "@/components/Pager";
+import SearchBox from "@/components/SearchBox";
 import { Patient } from "@/lib/api";
+import { apiQuery, pageOf, pageRows } from "@/lib/paging";
 import { serverApi } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
@@ -10,10 +13,11 @@ function fmt(iso: string | null) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-export default async function PatientsPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
-  const { q } = await searchParams;
-  const term = (q ?? "").trim();
-  const patients = await serverApi<Patient[]>(`/api/patients${term ? `?q=${encodeURIComponent(term)}` : ""}`);
+export default async function PatientsPage({ searchParams }: { searchParams: Promise<{ q?: string; page?: string }> }) {
+  const sp = await searchParams;
+  const term = (sp.q ?? "").trim();
+  const page = pageOf(sp);
+  const { rows: patients, hasNext } = pageRows(await serverApi<Patient[]>(`/api/patients?${apiQuery(page, { q: term })}`));
 
   return (
     <div className="space-y-6">
@@ -22,11 +26,7 @@ export default async function PatientsPage({ searchParams }: { searchParams: Pro
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Patients</h1>
           <p className="mt-1 text-sm text-slate-500">Register a patient, then attach their claim documents to them.</p>
         </div>
-        <form action="/patients" className="flex w-full gap-2 sm:w-auto">
-          <input name="q" defaultValue={term} placeholder="Search name or policy" aria-label="Search patients"
-            className="input sm:w-64" />
-          <button type="submit" className="btn-ghost ring-1 ring-slate-200">Search</button>
-        </form>
+        <SearchBox path="/patients" params={sp} placeholder="Search name or policy" />
       </div>
 
       <details className="card animate-fade-up group overflow-hidden [animation-delay:60ms]">
@@ -45,7 +45,7 @@ export default async function PatientsPage({ searchParams }: { searchParams: Pro
       <div className="card animate-fade-up overflow-hidden [animation-delay:120ms]">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5 text-xs text-slate-500 sm:px-6">
           <span>{term ? `Matching “${term}”` : "All patients, A to Z"}</span>
-          <span className="tabular-nums">{patients.length} shown</span>
+          <span className="tabular-nums">page {page} · {patients.length} shown</span>
         </div>
 
         {patients.length === 0 ? (
@@ -107,6 +107,8 @@ export default async function PatientsPage({ searchParams }: { searchParams: Pro
             </div>
           </>
         )}
+        <Pager path="/patients" params={sp} page={page} hasNext={hasNext} shown={patients.length}
+          className="border-t border-slate-100 px-5 pb-3 sm:px-6" />
       </div>
     </div>
   );

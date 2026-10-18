@@ -8,6 +8,8 @@ const STYLES: Record<string, string> = {
   REVIEWED: "bg-brand-50 text-brand-700 ring-brand-600/20",
   QUEUED: "bg-sky-50 text-sky-700 ring-sky-600/20",
   INGESTED: "bg-slate-100 text-slate-600 ring-slate-500/20",
+  CLASSIFIED: "bg-slate-100 text-slate-600 ring-slate-500/20",
+  BLURRY: "bg-orange-50 text-orange-800 ring-orange-600/25",
   PROCESSING: "bg-sky-50 text-sky-700 ring-sky-600/20",
   FAILED: "bg-rose-50 text-rose-700 ring-rose-600/20",
   ON_HOLD: "bg-orange-50 text-orange-800 ring-orange-600/25",
@@ -27,6 +29,8 @@ const LABELS: Record<string, string> = {
   ON_HOLD: "On hold",
   STOPPED: "Stopped",
   UNREADABLE: "Unreadable",
+  CLASSIFIED: "Classified",
+  BLURRY: "Blurry",
 };
 
 export default function Badge({ value }: { value: string | null | undefined }) {

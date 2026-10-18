@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import AutoRefresh from "@/components/AutoRefresh";
 import Badge from "@/components/Badge";
-import UploadPanel from "@/components/UploadPanel";
 import PatientForm from "../PatientForm";
 import { CaseSummary, Patient } from "@/lib/api";
 import { ApiError, serverApi } from "@/lib/server-api";
@@ -87,14 +86,6 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
           </div>
         </details>
       </div>
-
-      <section className="card animate-fade-up p-5 [animation-delay:60ms] sm:p-7">
-        <div className="mb-5">
-          <h2 className="text-sm font-semibold text-slate-900">Upload documents for this patient</h2>
-          <p className="mt-1 text-xs text-slate-500">Select several files at once. They are sent in one request and attached to this patient.</p>
-        </div>
-        <UploadPanel patientId={patient.patient_id} />
-      </section>
 
       <div className="card animate-fade-up overflow-hidden [animation-delay:120ms]">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 sm:px-6">

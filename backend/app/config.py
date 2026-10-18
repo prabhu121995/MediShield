@@ -62,11 +62,15 @@ def env_optional(name: str) -> str | None:
 
 
 # ---- models -----------------------------------------------------------------------
-LLM_PROVIDER = env_str("LLM_PROVIDER").lower()            # "ollama" (local) or "groq" (hosted)
+LLM_PROVIDER = env_str("LLM_PROVIDER").lower()            # "gemini" (hosted), "groq" (hosted) or "ollama" (local)
 GROQ_API_KEY = env_optional("GROQ_API_KEY")
+GEMINI_API_KEY = env_optional("GEMINI_API_KEY")
 if LLM_PROVIDER == "ollama":
     MODEL_NAME = env_str("OLLAMA_MODEL_NAME")
     VISION_MODEL_NAME = env_str("OLLAMA_VISION_MODEL_NAME")
+elif LLM_PROVIDER == "gemini":
+    MODEL_NAME = env_str("GEMINI_MODEL_NAME")
+    VISION_MODEL_NAME = env_str("GEMINI_VISION_MODEL_NAME")
 else:
     MODEL_NAME = env_str("MODEL_NAME")
     VISION_MODEL_NAME = env_str("VISION_MODEL_NAME")
@@ -77,6 +81,10 @@ OLLAMA_NUM_CTX = env_int("OLLAMA_NUM_CTX")
 OLLAMA_TIMEOUT_S = env_int("OLLAMA_TIMEOUT_S")
 OLLAMA_MAX_TOKENS_TEXT = env_int("OLLAMA_MAX_TOKENS_TEXT")
 OLLAMA_MAX_TOKENS_VISION = env_int("OLLAMA_MAX_TOKENS_VISION")
+# Gemini: tried in order when a model is rate limited or overloaded (429 / 5xx)
+GEMINI_FALLBACK_MODELS = [m.strip() for m in (env_optional("GEMINI_FALLBACK_MODELS") or "").split(",") if m.strip()]
+GEMINI_THINKING_LEVEL = env_optional("GEMINI_THINKING_LEVEL")   # low | medium | high; unset: the model's default
+GEMINI_TIMEOUT_S = env_int("GEMINI_TIMEOUT_S") if LLM_PROVIDER == "gemini" else 0
 LLM_RETRY_ATTEMPTS = env_int("LLM_RETRY_ATTEMPTS")
 LLM_MAX_RATE_LIMIT_WAIT_S = env_int("LLM_MAX_RATE_LIMIT_WAIT_S")
 VISION_MAX_SIDE = env_int("VISION_MAX_SIDE")

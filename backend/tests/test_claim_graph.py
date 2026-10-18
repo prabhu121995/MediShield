@@ -149,22 +149,35 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(state["fraud"]["fraud_score"], 0.0)
         self.assertNotIn("__interrupt__", state)
 
-    def test_each_page_is_preprocessed_classified_extracted_in_turn(self):
+    def test_every_page_is_classified_before_any_page_is_read(self):
         state = self.run_claim(claim=claim(), id=id_card())
         agents = [e["agent"] for e in state["trace"]]
-        self.assertEqual(agents[:7], ["preprocess", "classify", "extract"] * 2 + ["plan"])
-        self.assertEqual(set(agents[7:9]), {"kyc", "claims"})              # the parallel super-step
+        self.assertEqual(agents[:5], ["classify", "classify", "extract", "extract", "plan"])
+        self.assertEqual(set(agents[5:7]), {"kyc", "claims"})              # the parallel super-step
         self.assertEqual(agents[-3:], ["policy", "fraud", "decide"])
 
     def test_preprocessor_text_is_kept_for_the_ui(self):
         state = self.run_claim(claim=claim(), id=id_card())
-        self.assertEqual(state["docs"][1]["raw_text"], "DRIVER'S LICENSE [id]")
+        by_file = {d["file_name"]: d for d in state["docs"]}
+        self.assertEqual(by_file["id.png"]["raw_text"], "DRIVER'S LICENSE [id]")
+
+    def test_pages_are_classified_and_read_in_page_order(self):
+        amendment = page("POLICY_AMENDMENT", "POLICY AMENDMENT", patient_name="Jane Doe Q.", policy_number=POLICY)
+        state = self.run_claim(rx=rx(), amendment=amendment, discharge=discharge(), claim=claim(), id=id_card())
+        order = ["id.png", "claim.png", "discharge.png", "rx.png", "amendment.png"]
+        self.assertEqual([d["file_name"] for d in state["classified"]], order)      # by file-name hint
+        self.assertEqual([d["file_name"] for d in state["docs"]], order)            # by classified type
+
+    def test_reading_order_follows_the_classified_type_not_the_file_name(self):
+        state = self.run_claim(scan1=rx(), scan2=claim(), scan3=id_card())       # no hint in the names
+        self.assertEqual([d["file_name"] for d in state["classified"]], ["scan1.png", "scan2.png", "scan3.png"])
+        self.assertEqual([d["file_name"] for d in state["docs"]], ["scan3.png", "scan2.png", "scan1.png"])
 
     def test_every_step_is_audited_with_a_timestamp(self):
         self.run_claim(claim=claim(), id=id_card())
         done = [e["actor"] for e in self.events if e["event"] == "agent_completed"]
         begun = [e["actor"] for e in self.events if e["event"] == "agent_started"]
-        for agent, n in (("preprocess", 2), ("classify", 2), ("extract", 2)):
+        for agent, n in (("classify", 2), ("extract", 2)):
             self.assertEqual(done.count(agent), n)
             self.assertEqual(begun.count(agent), n)
         for agent in ("plan", "kyc", "claims", "policy", "fraud", "decide"):
@@ -175,10 +188,11 @@ class ClaimGraphTests(unittest.TestCase):
     def test_audit_note_says_how_long_each_agent_took_and_what_it_returned(self):
         self.run_claim(claim=claim(), id=id_card())
         done = {(e["actor"], e["detail"].get("file_name")): e for e in self.events if e["event"] == "agent_completed"}
-        pre = done[("preprocess", "id.png")]["detail"]["note"]
-        self.assertRegex(pre, r"^preprocess on id\.png took .+ and returned: \d+ characters of text; image clear")
         cls = done[("classify", "claim.png")]["detail"]["note"]
-        self.assertIn("returned: type CLAIM_FORM at 95% confidence", cls)
+        self.assertRegex(cls, r"^classify on claim\.png took .+ and returned: type CLAIM_FORM at 95% confidence; "
+                              r"image clear, blur variance 900\.0 \(sharp\)")
+        pre = done[("extract", "id.png")]["detail"]["note"]
+        self.assertRegex(pre, r"^extract on id\.png took .+ and returned: \d+ characters of text \(image clear\)")
         ext = done[("extract", "claim.png")]["detail"]
         self.assertIn("claim_amount", ext["fields_extracted"])
         self.assertIn("field(s) read", ext["note"])
@@ -187,26 +201,36 @@ class ClaimGraphTests(unittest.TestCase):
 
     # ---- classification -------------------------------------------------------------------
 
-    def test_blurry_page_escalates(self):
-        state = self.run_claim(claim=claim(), id=id_card(), rx=rx(quality="blurry"))
-        self.assertEqual(self.decision(state), "ESCALATE")
-        self.assertTrue(any("blurry" in r for r in state["decision"]["reasons"]))
+    def test_blurry_page_holds_before_any_page_is_read_then_escalates(self):
+        state = self.run_claim(thread="b1", claim=claim(), id=id_card(), rx=rx(quality="blurry"))
+        self.assertEqual(self.graph.get_state(run_config("b1")).next, ("ingest_hold",))
+        self.assertEqual(state["docs"], [])                                  # nothing read yet
+        self.assertNotIn("extract", [e["agent"] for e in state["trace"]])
+        final = self.graph.invoke(Command(resume={"action": "continue", "reviewer": "ops1"}), config=run_config("b1"))
+        self.assertEqual(self.decision(final), "ESCALATE")
+        self.assertTrue(any("blurry" in r for r in final["decision"]["reasons"]))
 
-    def test_low_variance_page_escalates(self):
+    def test_low_variance_page_holds(self):
         self.blurry.add("/tmp/rx.png")
-        self.assertEqual(self.decision(self.run_claim(claim=claim(), id=id_card(), rx=rx())), "ESCALATE")
+        state = self.run_claim(thread="b2", claim=claim(), id=id_card(), rx=rx())
+        pages = self.graph.get_state(run_config("b2")).tasks[0].interrupts[0].value["pages"]
+        self.assertEqual([p["file_name"] for p in pages], ["rx.png"])
+        self.assertIn("blurry", pages[0]["reason"])
+        self.assertNotIn("decision", state)
 
     def test_unclassifiable_page_holds_then_escalates_when_a_person_continues(self):
         state = self.run_claim(thread="u1", claim=claim(), id=id_card(), other={**rx(), "confidence": 0.3})
-        self.assertEqual(state["docs"][2]["doc_type"], "UNKNOWN")
-        self.assertEqual(state["docs"][2]["classified_as"], "PRESCRIPTION")
+        self.assertEqual(state["classified"][2]["doc_type"], "UNKNOWN")
+        self.assertEqual(state["classified"][2]["classified_as"], "PRESCRIPTION")
         self.assertIn("__interrupt__", state)
         self.assertEqual(self.graph.get_state(run_config("u1")).next, ("ingest_hold",))
-        self.assertNotIn("decision", state)                                  # no claim agent ran
+        self.assertEqual(state["docs"], [])                                  # no page read, no claim agent ran
+        self.assertNotIn("decision", state)
         final = self.graph.invoke(Command(resume={"action": "continue", "note": "ok", "reviewer": "ops1"}),
                                   config=run_config("u1"))
         self.assertEqual(self.decision(final), "ESCALATE")
         self.assertEqual(final["hold"]["action"], "continue")
+        self.assertEqual(len(final["docs"]), 3)                              # read after the person continued
 
     def test_unknown_document_alone_holds_without_running_agents(self):
         state = self.run_claim(thread="u2", bill=UNKNOWN)
@@ -220,10 +244,9 @@ class ClaimGraphTests(unittest.TestCase):
             raise RuntimeError("LLM call failed after 3 attempt(s): timed out")
         with mock.patch.object(page_agents, "transcribe", broken):
             state = self.run_claim(thread="u3", claim=claim(), id=id_card())
-        self.assertTrue(state["docs"][0]["error"].startswith("preprocess failed"))
+        self.assertTrue(state["docs"][0]["error"].startswith("extract failed"))
         self.assertEqual(self.graph.get_state(run_config("u3")).next, ("ingest_hold",))
-        skipped = [e for e in self.events if e["actor"] == "classify" and e["event"] == "agent_completed"][0]
-        self.assertIn("skipped because an earlier step failed", skipped["detail"]["note"])
+        self.assertEqual(self.graph.get_state(run_config("u3")).tasks[0].interrupts[0].value["step"], "extract")
         final = self.graph.invoke(Command(resume={"action": "stop", "reviewer": "ops1"}), config=run_config("u3"))
         self.assertEqual(final["hold"]["action"], "stop")
         self.assertNotIn("decision", final)
@@ -236,6 +259,54 @@ class ClaimGraphTests(unittest.TestCase):
         with self.assertRaises(_node.ClaimCancelled):
             self.run_claim(thread="s1", claim=claim())
 
+    def test_a_stop_ends_a_model_call_in_flight_at_once(self):
+        import time
+        from app import llm
+        from app.claim import _node
+        stopped: set[str] = set()
+        _node.set_cancel_check(lambda claim_id: claim_id in stopped)
+        self.addCleanup(_node.set_cancel_check, lambda claim_id: False)
+        scope = _node.current_claim.set("claim-1")
+        self.addCleanup(_node.current_claim.reset, scope)
+        threading = __import__("threading")
+        threading.Timer(0.3, lambda: stopped.add("claim-1")).start()
+        t0 = time.monotonic()
+        with self.assertRaises(_node.ClaimCancelled):
+            llm._with_retry(lambda: time.sleep(30))              # a model that takes 30 s
+        self.assertLess(time.monotonic() - t0, 2)
+
+    def test_a_claim_stopped_mid_run_resumes_from_the_last_finished_page(self):
+        from app.claim import _node
+        reads: list[str] = []
+        real = page_agents.transcribe
+
+        def transcribe(path):
+            reads.append(path)
+            if len(reads) == 2 and not resumed:
+                raise _node.ClaimCancelled("claim-1")            # stopped while reading the second page
+            return real(path)
+        resumed = False
+        with mock.patch.object(page_agents, "transcribe", transcribe):
+            with self.assertRaises(_node.ClaimCancelled):
+                self.run_claim(thread="r1", claim=claim(), id=id_card())
+            self.assertEqual(self.graph.get_state(run_config("r1")).next, ("extract",))
+            resumed = True
+            state = self.graph.invoke(None, config=run_config("r1"))
+        self.assertEqual(self.decision(state), "APPROVE", state["decision"]["justification"])
+        self.assertEqual([r.rsplit("/", 1)[1] for r in reads], ["id.png", "claim.png", "claim.png"])   # id read once
+
+    def test_page_that_cannot_be_classified_holds_and_is_skipped_when_continued(self):
+        def broken(path):
+            raise RuntimeError("timed out")
+        with mock.patch.object(page_agents, "classify", broken):
+            state = self.run_claim(thread="u4", claim=claim(), id=id_card())
+            self.assertEqual(self.graph.get_state(run_config("u4")).tasks[0].interrupts[0].value["step"], "classify")
+            self.assertEqual(state["docs"], [])
+            final = self.graph.invoke(Command(resume={"action": "continue", "reviewer": "ops1"}), config=run_config("u4"))
+        skipped = [e for e in self.events if e["actor"] == "extract" and e["event"] == "agent_completed"][0]
+        self.assertIn("skipped because an earlier step failed", skipped["detail"]["note"])
+        self.assertEqual(self.decision(final), "ESCALATE")                   # no second hold
+
     def test_reviewer_type_correction_is_used(self):
         self.pages["/tmp/x.png"] = {**rx(), "doc_type": "UNKNOWN", "_text": "x"}
         state = run_claim_graph("claim-1", "t", [{"doc_id": "d0", "file_path": "/tmp/x.png", "file_name": "x.png",
@@ -243,19 +314,42 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(state["docs"][0]["doc_type"], "PRESCRIPTION")
         self.assertEqual(state["docs"][0]["classifier_source"], "human_override")
 
-    # ---- KYC: member name + insurance card wording only -----------------------------------
+    # ---- KYC: member name (reject) + insurance card validity (human review) -----------------
 
     def test_name_not_a_member_rejects(self):
         state = self.run_claim(claim=claim(name="Max Power"), id=id_card(name="MAX POWER"))
         self.assertEqual(self.decision(state), "REJECT")
         self.assertIn("NAME_NOT_A_MEMBER", state["kyc"]["flags"])
 
-    def test_insurance_card_saying_card_expired_rejects(self):
+    def test_insurance_card_saying_card_expired_goes_to_human_review(self):
         card = id_card(text="MediShield Health Insurance GOLD PLAN MEMBER ID CARD ** CARD EXPIRED - NOT VALID **",
                        kind="insurance member card")
         state = self.run_claim(claim=claim(), id=card)
-        self.assertEqual(self.decision(state), "REJECT")
-        self.assertIn("CARD_INVALID", state["kyc"]["flags"])
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertTrue(state["kyc"]["kyc_passed"])                          # the name is a member
+        self.assertTrue(state["kyc"]["needs_review"])
+        self.assertIn("INSURANCE_CARD_NOT_VALID", state["kyc"]["flags"])
+
+    def test_insurance_card_expired_before_treatment_goes_to_review_without_a_fraud_tag(self):
+        card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card",
+                       expiry="2025-01-31")
+        state = self.run_claim(claim=claim(), id=card)
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertTrue(any("insurance card" in r for r in state["decision"]["reasons"]))
+        self.assertNotIn("id_expired", state["fraud"]["tags"])               # KYC owns the card's expiry
+
+    def test_insurance_card_the_model_reads_as_not_valid_goes_to_review(self):
+        card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card")
+        card["fields"].update(card_marked_invalid=True, invalid_text="NOT VALID FOR BENEFITS")
+        state = self.run_claim(claim=claim(), id=card)
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertIn("NOT VALID FOR BENEFITS", " ".join(state["kyc"]["review_reasons"]))
+
+    def test_valid_insurance_card_passes(self):
+        card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card")
+        state = self.run_claim(claim=claim(), id=card)
+        self.assertTrue(state["kyc"]["kyc_passed"], state["kyc"])
+        self.assertEqual(self.decision(state), "APPROVE", state["decision"]["justification"])
 
     def test_not_valid_for_federal_purposes_on_a_state_id_is_fine(self):
         card = id_card(text="STATE OF ILLINOIS IDENTIFICATION CARD NOT VALID FOR FEDERAL PURPOSES", kind="state ID")
@@ -323,14 +417,32 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(self.decision(state), "REJECT")
         self.assertFalse(state["policy"]["covered"])
 
-    def test_required_fields_reject(self):
+    def test_missing_required_fields_are_a_fraud_flag_not_a_claims_rejection(self):
         state = self.run_claim(claim=claim(npi=None, signature=None), id=id_card())
-        self.assertEqual(self.decision(state), "REJECT")
-        self.assertTrue(any("provider_npi" in e for e in state["claims"]["schema_errors"]))
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertIn("missing_field", state["fraud"]["tags"])
+        detail = next(a["detail"] for a in state["fraud"]["anomalies"] if a["type"] == "missing_field")
+        self.assertIn("provider_npi", detail)
+        self.assertNotIn("schema_errors", state["claims"])                   # the claims agent only extracts
 
-    def test_field_the_page_marks_missing_rejects(self):
+    def test_field_the_page_marks_missing_is_flagged_by_fraud(self):
         state = self.run_claim(claim=claim(), id=id_card(), rx=rx(missing=["sig"]))
-        self.assertEqual(self.decision(state), "REJECT")
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertIn("missing_field", state["fraud"]["tags"])
+
+    def test_claims_agent_hands_the_policy_agent_a_brief(self):
+        seen: list[str] = []
+
+        def llm(system, user):
+            seen.append(user)
+            return fake_policy_llm(system, user)
+        with mock.patch.object(policy_agent, "chat_json", llm):
+            state = self.run_claim(claim=claim(cpt=("99213",), icd=("E11.9",)), id=id_card(), rx=rx())
+        brief = state["claims"]["policy_brief"]
+        self.assertEqual((brief["cpt_codes"], brief["icd10_codes"], brief["claim_amount"]), (["99213"], ["E11.9"], 250.0))
+        self.assertIn("Amlodipine (Norvasc)", brief["medications"])
+        self.assertIn("Diagnoses (ICD-10): E11.9", seen[0])
+        self.assertIn("Billed amount: 250.0", seen[0])
 
     def test_policy_store_empty_escalates(self):
         set_policy_store(FakeStore(empty=True))

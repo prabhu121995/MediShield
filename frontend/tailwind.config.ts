@@ -66,6 +66,26 @@ const config: Config = {
           "0%": { transform: "scale(0.85)", opacity: "0.6" },
           "100%": { transform: "scale(1.6)", opacity: "0" },
         },
+        // A short dance, then a rest: hop, wiggle left and right, settle.
+        dance: {
+          "0%, 55%, 100%": { transform: "translateY(0) rotate(0)" },
+          "60%": { transform: "translateY(-8px) rotate(-8deg)" },
+          "66%": { transform: "translateY(0) rotate(8deg)" },
+          "72%": { transform: "translateY(-5px) rotate(-6deg)" },
+          "78%": { transform: "translateY(0) rotate(5deg)" },
+          "84%": { transform: "translateY(-2px) rotate(-2deg)" },
+          "90%": { transform: "translateY(0) rotate(0)" },
+        },
+        wave: {
+          "0%, 50%, 100%": { transform: "rotate(0)" },
+          "10%, 30%": { transform: "rotate(16deg)" },
+          "20%, 40%": { transform: "rotate(-10deg)" },
+        },
+        "bubble-in": {
+          "0%": { opacity: "0", transform: "translateY(8px) scale(0.7)" },
+          "60%": { opacity: "1", transform: "translateY(-2px) scale(1.04)" },
+          "100%": { opacity: "1", transform: "translateY(0) scale(1)" },
+        },
       },
       animation: {
         "fade-in": "fade-in 0.35s ease-out both",
@@ -80,6 +100,9 @@ const config: Config = {
         blink: "blink 4s ease-in-out infinite",
         "antenna-ping": "antenna-ping 1.6s ease-in-out infinite",
         ripple: "ripple 2.4s ease-out infinite",
+        dance: "dance 3s ease-in-out infinite",
+        wave: "wave 2s ease-in-out infinite",
+        "bubble-in": "bubble-in 0.5s cubic-bezier(0.16,1,0.3,1) 0.4s both",
       },
     },
   },

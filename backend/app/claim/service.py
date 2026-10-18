@@ -3,10 +3,20 @@ Claim lifecycle: queue, run the claim graph, persist, human review.
 
 Status of a claim (claim_bundle.status):
     QUEUED -> PROCESSING -> APPROVED | REJECTED | NEEDS_REVIEW | ON_HOLD | STOPPED | FAILED
-    NEEDS_REVIEW -> REVIEWED                      (ops staff decide; the paused run resumes)
-    ON_HOLD                                       step one (page reading) is incomplete, or an agent
-                                                  failed: a person continues, stops or re-uploads
-    PROCESSING -> STOPPED                         a person stopped it; it ends after the current step
+    NEEDS_REVIEW -> APPROVED | REJECTED           ops staff decide; the paused run resumes
+    NEEDS_REVIEW -> NEEDS_REVIEW                  "keep escalated": the note is recorded and the
+                                                  run stays paused at the checkpoint
+    ON_HOLD                                       a page is UNKNOWN, blurry or failed at classification
+                                                  (checked for every page before any is read), a page
+                                                  could not be read, or an agent failed: a person
+                                                  continues, stops or re-uploads
+    QUEUED | PROCESSING | ON_HOLD | NEEDS_REVIEW -> STOPPED
+                                                  a person stopped it. A running claim stops at once:
+                                                  the model call in flight is abandoned and no further
+                                                  agent starts
+    STOPPED -> PROCESSING                         resumed: the run continues from its checkpoint (the
+                                                  last finished step); a claim that was waiting for a
+                                                  person goes back to waiting (ON_HOLD / NEEDS_REVIEW)
 
 An ESCALATE run pauses at the human_review node (LangGraph interrupt) and its state is kept in
 the checkpoint store under its thread id. The reviewer's decision resumes that same run.
@@ -28,9 +38,9 @@ from typing import Any
 from app import audit, config, db
 from langgraph.types import Command
 
-from app.claim._node import ClaimCancelled, set_cancel_check
+from app.claim._node import ClaimCancelled, current_claim, set_cancel_check
 from app.claim.graph import get_claim_graph
-from app.claim.hold import problem_pages
+from app.claim.hold import problem_pages, stage_of
 from app.claim.state import ClaimState
 
 log = logging.getLogger("medishield.claims")
@@ -40,9 +50,13 @@ STATUS_BY_DECISION = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "ESCALATE": "
 RESULT_KEYS = ("plan", "kyc", "claims", "policy", "fraud", "decision", "trace", "hold")
 RUNNING = ("QUEUED", "PROCESSING")
 
-# Claims a person asked to stop. The worker checks this before each agent starts.
+# Claims a person stopped while their run was queued or in flight. The run checks this before
+# each agent starts and every half second during a model call; the run removes it when it ends.
 _stop_requested: set[str] = set()
 set_cancel_check(lambda claim_id: claim_id in _stop_requested)
+
+# claim_id -> the checkpoint thread of its run in flight, so a stop knows where to resume from.
+_running: dict[str, str] = {}
 
 
 class ClaimBusy(Exception):
@@ -66,7 +80,7 @@ def ensure_idle(exclude: str | None = None) -> None:
 
 
 def run_config(thread_id: str, pages: int = 0) -> dict:
-    # Three graph steps per page (preprocess, classify, extract), plus the fixed agents.
+    # Two graph steps per page (classify, then preprocess + extract), plus the fixed agents.
     return {"configurable": {"thread_id": thread_id}, "recursion_limit": 3 * pages + 30}
 
 
@@ -76,7 +90,7 @@ def run_claim_graph(claim_id: str, title: str, documents: list[dict], thread_id:
     state: ClaimState = {
         "claim_id": claim_id, "title": title,
         "received_at": datetime.now(timezone.utc).isoformat(),
-        "documents": documents, "docs": [], "trace": [], "status": "RECEIVED",
+        "documents": documents, "classified": [], "docs": [], "trace": [], "status": "RECEIVED",
     }
     return get_claim_graph().invoke(state, config=run_config(thread_id or f"{claim_id}:{uuid.uuid4().hex[:8]}",
                                                               len(documents)))
@@ -103,14 +117,23 @@ def _documents_of(claim_id: str) -> list[dict]:
     return out
 
 
+def pages_of(state: dict) -> list[dict]:
+    """Every page as far as it got: read pages, then pages only classified so far."""
+    docs = list(state.get("docs") or [])
+    read = {d["doc_id"] for d in docs}
+    return docs + [p for p in state.get("classified") or [] if p["doc_id"] not in read]
+
+
 def _persist_documents(claim_id: str, state: dict) -> None:
     rows = {r["case_id"]: r for r in db.bundle_documents(claim_id)}
-    for doc in state.get("docs") or []:
+    read = {d["doc_id"] for d in state.get("docs") or []}
+    for doc in pages_of(state):
         row = rows.get(doc["doc_id"])
         if row is None:
             continue
         db.save_case({**row, "doc_type": doc.get("doc_type"),
-                      "status": "UNREADABLE" if doc.get("error") else "INGESTED",
+                      "status": "UNREADABLE" if doc.get("error") else "BLURRY" if doc.get("is_blurry")
+                      else "INGESTED" if doc["doc_id"] in read else "CLASSIFIED",
                       "decision": None, "confidence": doc.get("read_confidence"), "needs_review": False,
                       "result": {"file_path": row["result"]["file_path"], "ingest": doc}})
 
@@ -139,7 +162,7 @@ def _persist_history(claim_id: str, state: dict) -> None:
 
 def result_of(state: dict) -> dict[str, Any]:
     result = {k: state.get(k) for k in RESULT_KEYS}
-    result["documents"] = list(state.get("docs") or [])          # with the preprocessor's page text
+    result["documents"] = pages_of(state)                        # with the page text once read
     result["review"] = state.get("review")
     return result
 
@@ -156,24 +179,33 @@ def _agent_errors(state: dict) -> list[str]:
 def _finish(claim_id: str, thread_id: str, state: dict) -> None:
     """Store the outcome of a run that ended or paused."""
     _persist_documents(claim_id, state)
-    if waiting_on_hold(thread_id):                 # step one incomplete: a person decides
-        pages = problem_pages(state.get("docs") or [])
-        hold = {"stage": "ingest", "pages": pages,
+    if waiting_on_hold(thread_id):                 # a page needs a person before the run goes on
+        pages = problem_pages(state)
+        step = stage_of(state)
+        hold = {"stage": "ingest", "step": step, "pages": pages,
                 "reasons": [f"{p['file_name']}: {p['reason']}" for p in pages]}
         db.update_bundle(claim_id, "ON_HOLD", needs_review=True,
                          result={**result_of(state), "thread_id": thread_id, "awaiting_human": True,
                                  "awaiting": "ingest_hold", "hold": hold})
         audit.record(claim_id, "orchestrator", "claim_on_hold",
-                     detail={"stage": "ingest", "reasons": hold["reasons"], "thread_id": thread_id,
-                             "note": "Page reading is incomplete, so the claim agents did not run. "
-                                     "A person must continue, stop, or re-upload the page(s)."})
+                     detail={"stage": "ingest", "step": step, "reasons": hold["reasons"], "thread_id": thread_id,
+                             "note": ("Not every page could be classified (unknown, blurry or failed), so no page "
+                                      "was read. " if step == "classify" else
+                                      "A page could not be read, so the claim agents did not run. ")
+                                     + "A person must continue, stop, or re-upload the page(s)."})
         return
     if (state.get("hold") or {}).get("action") == "stop":
         db.update_bundle(claim_id, "STOPPED", needs_review=False,
                          result={**result_of(state), "thread_id": thread_id, "awaiting_human": False})
         audit.record(claim_id, "orchestrator", "claim_stopped", detail={"note": "stopped at the hold"})
         return
-    _persist_history(claim_id, state)
+    try:
+        _persist_history(claim_id, state)
+    except Exception as exc:                       # history feeds later fraud checks; it must not fail this claim
+        log.exception("claim %s: history not stored", claim_id)
+        audit.record(claim_id, "orchestrator", "history_not_stored", status="error",
+                     detail={"error": f"{type(exc).__name__}: {exc}",
+                             "note": "The decision stands; this claim's facts were not saved for later duplicate/readmission checks."})
     out = state.get("decision") or {}
     decision = out.get("decision")
     if decision is None:                           # the decision node itself failed
@@ -200,14 +232,29 @@ def _finish(claim_id: str, thread_id: str, state: dict) -> None:
         audit.record(claim_id, "orchestrator", "paused_for_human_review", detail={"thread_id": thread_id})
 
 
+def _stopped_mid_run(claim_id: str, thread_id: str) -> None:
+    """The run ended because a person stopped the claim. Store what it finished (stop_claim
+    already set STOPPED) and where it can resume from."""
+    state = get_claim_graph().get_state(run_config(thread_id)).values or {}
+    _persist_documents(claim_id, state)
+    bundle = db.get_bundle(claim_id)
+    if bundle and bundle["status"] == "STOPPED":
+        resume = {**((bundle.get("result") or {}).get("resume") or {}), "thread_id": thread_id}
+        db.update_bundle(claim_id, "STOPPED", needs_review=False,
+                         result={**result_of(state), "thread_id": thread_id, "awaiting_human": False, "resume": resume})
+    audit.record(claim_id, "orchestrator", "run_cancelled",
+                 detail={"thread_id": thread_id, "resume_at": list(paused_at(thread_id)),
+                         "note": "The run ended at once. Resume continues from the last finished step."})
+
+
 def _run(claim_id: str, thread_id: str, call) -> None:
     """Run (or resume) a claim's graph and store the outcome. Never leaves it PROCESSING."""
+    _running[claim_id] = thread_id
+    scope = current_claim.set(claim_id)            # lets a stop end a model call in flight
     try:
         _finish(claim_id, thread_id, call())
     except ClaimCancelled:
-        db.update_bundle(claim_id, "STOPPED", needs_review=False, keep_result=True)
-        audit.record(claim_id, "orchestrator", "claim_stopped",
-                     detail={"note": "stopped by a person before the next agent started"})
+        _stopped_mid_run(claim_id, thread_id)
     except Exception as exc:                       # a claim must end FAILED, never stay PROCESSING
         log.exception("claim %s failed", claim_id)
         db.update_bundle(claim_id, "FAILED", decision="ESCALATE", needs_review=True,
@@ -215,16 +262,16 @@ def _run(claim_id: str, thread_id: str, call) -> None:
         audit.record(claim_id, "orchestrator", "claim_failed", status="error",
                      detail={"error": f"{type(exc).__name__}: {exc}"})
     finally:
+        current_claim.reset(scope)
+        _running.pop(claim_id, None)
         _stop_requested.discard(claim_id)
 
 
 def process_claim(claim_id: str) -> None:
-    if claim_id in _stop_requested:               # stopped while still queued
-        _stop_requested.discard(claim_id)
-        db.update_bundle(claim_id, "STOPPED", needs_review=False, keep_result=True)
-        audit.record(claim_id, "orchestrator", "claim_stopped", detail={"note": "stopped before it started"})
-        return
     bundle = db.get_bundle(claim_id, with_result=False)
+    if claim_id in _stop_requested or bundle is None or bundle["status"] != "QUEUED":   # stopped while queued
+        _stop_requested.discard(claim_id)
+        return
     documents = _documents_of(claim_id)
     db.update_bundle(claim_id, "PROCESSING", keep_result=True)
     audit.record(claim_id, "orchestrator", "claim_started", detail={"documents": len(documents)})
@@ -233,7 +280,7 @@ def process_claim(claim_id: str) -> None:
 
 
 def resolve_hold(claim_id: str, action: str, note: str, user: str) -> None:
-    """A person decides a claim that is ON_HOLD after page reading: continue or stop."""
+    """A person decides a claim that is ON_HOLD in the document queue: continue or stop."""
     bundle = db.get_bundle(claim_id)
     result = bundle.get("result") or {}
     thread_id = result.get("thread_id")
@@ -250,17 +297,66 @@ def resolve_hold(claim_id: str, action: str, note: str, user: str) -> None:
     _executor.submit(_run, claim_id, thread_id, lambda: get_claim_graph().invoke(answer, config=run_config(thread_id)))
 
 
+def _without_resume(result: dict) -> dict:
+    return {k: v for k, v in result.items() if k != "resume"}
+
+
 def stop_claim(claim_id: str, user: str, note: str = "") -> str:
-    """Stop a claim. A running claim stops before its next agent starts; a waiting one at once."""
-    bundle = db.get_bundle(claim_id, with_result=False)
+    """Stop a claim at once. A running claim's model call in flight is abandoned and no further
+    agent starts; its run is checkpointed, so resume_claim continues from the last finished step."""
+    bundle = db.get_bundle(claim_id)
+    if bundle["status"] == "STOPPED":
+        return "STOPPED"
+    result = bundle.get("result") or {}
+    resume: dict = {"from": bundle["status"]}
     if bundle["status"] in RUNNING:
         _stop_requested.add(claim_id)
-        audit.record(claim_id, user, "stop_requested", detail={"note": note or "stop after the current step"})
-        return "STOPPING"
+        if claim_id in _running:
+            resume["thread_id"] = _running[claim_id]
     db.update_bundle(claim_id, "STOPPED", decision=bundle.get("decision"), confidence=bundle.get("confidence"),
-                     needs_review=False, keep_result=True, updated_by=user)
+                     needs_review=False, result={**result, "resume": resume}, updated_by=user)
     audit.record(claim_id, user, "claim_stopped", detail={"note": note, "from": bundle["status"]})
     return "STOPPED"
+
+
+def _continue_run(claim_id: str, thread_id: str) -> None:
+    bundle = db.get_bundle(claim_id, with_result=False)
+    if claim_id in _stop_requested or bundle is None or bundle["status"] != "QUEUED":   # stopped again while queued
+        _stop_requested.discard(claim_id)
+        return
+    db.update_bundle(claim_id, "PROCESSING", keep_result=True)
+    _run(claim_id, thread_id, lambda: get_claim_graph().invoke(None, config=run_config(thread_id)))
+
+
+def resume_claim(claim_id: str, user: str) -> str:
+    """Undo a stop. A claim that was waiting for a person goes back to waiting; a run that was
+    stopped part-way continues from its checkpoint; anything else runs again from the start
+    (pages already read come from the model cache). Returns the new status."""
+    bundle = db.get_bundle(claim_id)
+    if bundle["status"] != "STOPPED":
+        raise ValueError(f"only a stopped claim can be resumed; this one is {bundle['status'].lower()}")
+    if claim_id in _stop_requested:
+        raise ClaimBusy("the claim is still stopping; try again in a moment")
+    result = bundle.get("result") or {}
+    resume = result.get("resume") or {}
+    before = resume.get("from")
+    waiting = result.get("thread_id") and paused_at(result["thread_id"])
+    if before in ("ON_HOLD", "NEEDS_REVIEW") and waiting:      # it was waiting for a person
+        db.update_bundle(claim_id, before, decision=bundle.get("decision"), confidence=bundle.get("confidence"),
+                         needs_review=True, result=_without_resume(result), updated_by=user)
+        audit.record(claim_id, user, "claim_resumed", detail={"to": before})
+        return before
+    ensure_idle(claim_id)
+    thread_id = resume.get("thread_id")
+    if thread_id and paused_at(thread_id):                    # stopped part-way: continue from the checkpoint
+        db.update_bundle(claim_id, "QUEUED", result=_without_resume(result), updated_by=user)
+        audit.record(claim_id, user, "claim_resumed",
+                     detail={"thread_id": thread_id, "resume_at": list(paused_at(thread_id))})
+        _executor.submit(_continue_run, claim_id, thread_id)
+        return "QUEUED"
+    audit.record(claim_id, user, "claim_resumed", detail={"note": "nothing to continue from: running it again"})
+    rerun_claim(claim_id, user)
+    return "QUEUED"
 
 
 def submit_claim(title: str, pages: list[tuple[str, str, str | None]], created_by: str,
@@ -328,28 +424,41 @@ def replace_all_documents(claim_id: str, pages: list[tuple[str, str]], user: str
     rerun_claim(claim_id, user)
 
 
+STATUS_BY_REVIEW = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "ESCALATE": "NEEDS_REVIEW"}
+
+
 def override_decision(claim_id: str, decision: str, note: str, user: str) -> None:
-    """Ops staff decide a claim. An escalated claim whose run is paused at human_review is
-    resumed from its checkpoint with this decision; any other finished claim gets the
-    decision recorded as an override. Either way the agents' decision is kept."""
+    """Ops staff decide a claim; its status follows the decision (APPROVED, REJECTED, or still
+    NEEDS_REVIEW for "keep escalated"). An escalated claim whose run is paused at human_review
+    is resumed from its checkpoint with an approve or reject; "keep escalated" leaves it paused
+    and in the queue. Any other claim gets the decision recorded as an override. Either way the
+    agents' decision is kept."""
     bundle = db.get_bundle(claim_id)
     original = bundle.get("decision")
     result = bundle.get("result") or {}
     thread_id = result.get("thread_id")
+    status = STATUS_BY_REVIEW[decision]
+    if decision == "ESCALATE":                     # keep escalated: a person still has to decide
+        override = {"decision": decision, "note": note, "reviewer": user,
+                    "reviewed_at": audit.now(), "original_decision": original}
+        db.update_bundle(claim_id, status, decision="ESCALATE", confidence=bundle.get("confidence"),
+                         needs_review=True, override=override, keep_result=True, updated_by=user)
+        audit.record(claim_id, user, "review_kept_escalated", detail={"from": original, "note": note})
+        return
     if thread_id and waiting_for_human(thread_id):
         state = get_claim_graph().invoke(Command(resume={"decision": decision, "note": note, "reviewer": user}),
                                          config=run_config(thread_id))
         review = state.get("review") or {}
         audit.record(claim_id, user, "human_review_resumed",
                      detail={"from": original, "decision": decision, "note": note, "thread_id": thread_id})
-        db.update_bundle(claim_id, "REVIEWED", decision=decision, confidence=bundle.get("confidence"),
+        db.update_bundle(claim_id, status, decision=decision, confidence=bundle.get("confidence"),
                          needs_review=False, override=review,
                          result={**result, "review": review, "awaiting_human": False, "trace": state.get("trace")},
                          updated_by=user)
         return
     override = {"decision": decision, "note": note, "reviewer": user,
                 "reviewed_at": audit.now(), "original_decision": original}
-    db.update_bundle(claim_id, "REVIEWED", decision=decision, confidence=bundle.get("confidence"),
+    db.update_bundle(claim_id, status, decision=decision, confidence=bundle.get("confidence"),
                      needs_review=False, override=override, keep_result=True, updated_by=user)
     audit.record(claim_id, user, "human_override",
                  detail={"from": original, "decision": decision, "note": note})
@@ -359,6 +468,7 @@ def recover_interrupted_claims() -> int:
     """Claims still QUEUED or PROCESSING at startup were lost with the previous process: queue them again."""
     stuck = db.list_bundles(status="PROCESSING") + db.list_bundles(status="QUEUED")
     for b in stuck:
+        db.update_bundle(b["bundle_id"], "QUEUED", keep_result=True)    # process_claim only starts QUEUED claims
         audit.record(b["bundle_id"], "system", "claim_requeued_after_restart")
         _executor.submit(process_claim, b["bundle_id"])
     return len(stuck)

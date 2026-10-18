@@ -133,6 +133,26 @@ class Report:
             p.ln()
         p.ln(4)
 
+    def entries(self, title: str, items: list[tuple[str, str]]) -> None:
+        """A list of (heading line, wrapped text) pairs, for notes too long for a table cell."""
+        p = self.pdf
+        self.heading(title)
+        if not items:
+            p.set_font("Helvetica", "", 8)
+            p.set_text_color(*MUTED)
+            p.cell(0, 6, "No data in this range.", new_x="LMARGIN", new_y="NEXT")
+        for head, text in items:
+            p.set_font("Helvetica", "B", 8)
+            p.set_text_color(*MUTED)
+            p.multi_cell(0, 4.5, latin(head), new_x="LMARGIN", new_y="NEXT")
+            p.set_font("Helvetica", "", 8)
+            p.set_text_color(*INK)
+            p.multi_cell(0, 4, latin(text), new_x="LMARGIN", new_y="NEXT")
+            p.set_draw_color(*GRID)
+            p.line(p.l_margin, p.get_y() + 1, p.l_margin + self.width, p.get_y() + 1)
+            p.ln(2.5)
+        p.ln(3)
+
     def note(self, text: str) -> None:
         self.pdf.set_font("Helvetica", "", 7)
         self.pdf.set_text_color(*MUTED)

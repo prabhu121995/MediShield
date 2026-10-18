@@ -3,10 +3,14 @@ import PolicyUploader from "./PolicyUploader";
 import PolicyChat from "./PolicyChat";
 import { PolicyDoc } from "@/lib/api";
 import { currentUser, serverApi } from "@/lib/server-api";
+import Pager from "@/components/Pager";
+import SearchBox from "@/components/SearchBox";
+import { pageOf, slicePage } from "@/lib/paging";
 
 export const dynamic = "force-dynamic";
 
-export default async function PoliciesPage() {
+export default async function PoliciesPage({ searchParams }: { searchParams: Promise<{ q?: string; page?: string }> }) {
+  const sp = await searchParams;
   const user = await currentUser();
   if (!user) redirect("/login");
 
@@ -20,7 +24,10 @@ export default async function PoliciesPage() {
     );
   }
 
-  const docs = await serverApi<PolicyDoc[]>("/api/policies");
+  const all = await serverApi<PolicyDoc[]>("/api/policies");
+  const term = (sp.q ?? "").trim().toLowerCase();
+  const page = pageOf(sp);
+  const { rows: docs, hasNext, total } = slicePage(all.filter((d) => !term || d.filename.toLowerCase().includes(term)), page);
 
   return (
     <div className="space-y-6">
@@ -36,14 +43,17 @@ export default async function PoliciesPage() {
           <PolicyUploader />
 
           <section className="card animate-fade-up overflow-hidden [animation-delay:120ms]">
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-              <h2 className="text-sm font-semibold text-slate-900">Indexed policies</h2>
-              <span className="text-xs tabular-nums text-slate-500">{docs.length} {docs.length === 1 ? "document" : "documents"}</span>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-6 py-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Indexed policies</h2>
+                <span className="text-xs tabular-nums text-slate-500">{total} {total === 1 ? "document" : "documents"}</span>
+              </div>
+              <SearchBox path="/policies" params={sp} placeholder="Search file name" />
             </div>
             {docs.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
-                <p className="text-sm font-medium text-slate-700">Nothing indexed yet</p>
-                <p className="text-xs text-slate-500">Coverage checks need at least one policy. Upload a PDF above.</p>
+                <p className="text-sm font-medium text-slate-700">{term ? `No policy matches "${sp.q}"` : "Nothing indexed yet"}</p>
+                <p className="text-xs text-slate-500">{term ? "Try another file name." : "Coverage checks need at least one policy. Upload a PDF above."}</p>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -65,6 +75,7 @@ export default async function PoliciesPage() {
                     ))}
                   </tbody>
                 </table>
+                <Pager path="/policies" params={sp} page={page} hasNext={hasNext} shown={docs.length} total={total} className="px-6 pb-3" />
               </div>
             )}
           </section>

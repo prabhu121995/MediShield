@@ -1,24 +1,31 @@
 """
-KYC agent: two checks only. Runs in parallel with the claims -> policy branch.
+KYC agent. Runs in parallel with the claims -> policy branch.
 
-1. The claimant's name is a member: the name on the ID (else the claim form, else any page)
-   must match a member record (case and middle initials ignored). Several members can share a
-   name, so date of birth, then policy number, picks one; if it stays ambiguous the name still
-   exists and KYC passes, with no member linked.
-2. An insurance card must not say it is invalid: if an ID page is an insurance card (rules:
-   kyc.insurance_card_keywords), its text must not contain kyc.card_invalid_phrases (minus
-   kyc.ignore_phrases), and the vision model must not have read it as marked invalid.
+1. Main check: the claimant's name is in the member database. The name on the ID (else the
+   claim form, else any page) must match a member record (case and middle initials ignored).
+   Several members can share a name, so date of birth, then policy number, picks one; if it
+   stays ambiguous the name still exists and KYC passes, with no member linked.
+   No member of that name -> KYC failed -> REJECT.
+2. The insurance card must be valid: if an ID page is an insurance card (rules:
+   kyc.insurance_card_keywords), its expiry date must not be before the treatment date
+   (today when no treatment date was read), the card must not print an expired status (rules:
+   kyc.card_expired_phrases), and the model must not have read it as marked invalid.
+   A card that is not valid does not reject: it sends the claim to a person (needs_review ->
+   ESCALATE). Other ID pages (driver's licence, passport) are not checked here.
 
-Fail -> KYC failed -> REJECT. No name on any page -> unsure (confidence 0.5) -> ESCALATE.
-Every other identity question (ID expiry date, DOB or policy differences, name differences
-between pages) is a fraud tag, investigated by the fraud agent.
+No name on any page -> unsure (confidence 0.5) -> ESCALATE. Every other identity question
+(a non-card ID's expiry, DOB or policy differences, name differences between pages) is a
+fraud tag, investigated by the fraud agent.
 """
 
 from __future__ import annotations
 
+from datetime import date
+
 from app import config
 from app.agents._util import parse_date
 from app.claim._node import claim_node
+from app.claim.fraud import treatment_date
 from app.claim.state import ClaimState
 from app.db import get_repository
 
@@ -53,20 +60,24 @@ def is_insurance_card(doc: dict, rules: dict) -> bool:
     return any(k in kind or k in text for k in rules["insurance_card_keywords"])
 
 
-def invalid_wording(doc: dict, rules: dict) -> str | None:
-    text = (doc.get("raw_text") or "").upper()
-    for ignore in rules["ignore_phrases"]:
-        text = text.replace(ignore.upper(), "")
-    hit = next((p for p in rules["card_invalid_phrases"] if p.upper() in text), None)
-    if hit:
-        return hit
+def card_invalid(doc: dict, rules: dict, ref: date, ref_source: str) -> str | None:
+    """Why the insurance card is not valid, or None if it is."""
     fields = doc.get("fields") or {}
-    return (fields.get("invalid_text") or "marked invalid") if fields.get("card_marked_invalid") else None
+    expiry = parse_date(fields.get("id_expiry_date"))
+    if expiry and expiry < ref:
+        return f"expired {expiry}, before the {ref_source} ({ref})"
+    text = (doc.get("raw_text") or "").upper()
+    hit = next((p for p in rules["card_expired_phrases"] if p.upper() in text), None)
+    if hit:
+        return f"says '{hit}'"
+    if fields.get("card_marked_invalid") is True:
+        return "is marked not valid" + (f" ('{fields['invalid_text']}')" if fields.get("invalid_text") else "")
+    return None
 
 
 def check(docs: list[dict], repo, rules: dict | None = None) -> dict:
     rules = (rules or config.RULES)["kyc"]
-    checks, fail, flags = [], [], []
+    checks, fail, flags, review = [], [], [], []
 
     names = candidate_names(docs)
     member, matched_name = None, None
@@ -89,27 +100,36 @@ def check(docs: list[dict], repo, rules: dict | None = None) -> dict:
         flags.append("NO_NAME_ON_DOCUMENTS")
         checks.append({"check": "member_name", "passed": None, "detail": "no patient name on any page"})
 
-    for d in docs:
-        if d.get("doc_type") != "ID_DOCUMENT" or not is_insurance_card(d, rules):
-            continue
-        wording = invalid_wording(d, rules)
-        if wording:
-            fail.append("CARD_INVALID")
-            checks.append({"check": "insurance_card", "passed": False, "detail": f"{d['file_name']} says '{wording}'"})
+    ref, ref_source = treatment_date(docs)
+    ref, ref_source = (ref, ref_source) if ref else (date.today(), "date of checking")
+    cards = [d for d in docs if d.get("doc_type") == "ID_DOCUMENT" and is_insurance_card(d, rules)]
+    for d in cards:
+        invalid = card_invalid(d, rules, ref, ref_source)
+        if invalid:
+            flags.append("INSURANCE_CARD_NOT_VALID")
+            review.append(f"insurance card {d['file_name']} {invalid}")
+            checks.append({"check": "insurance_card", "passed": False, "detail": f"{d['file_name']} {invalid}"})
         else:
-            checks.append({"check": "insurance_card", "passed": True, "detail": f"{d['file_name']} is not marked invalid"})
+            expiry = (d.get("fields") or {}).get("id_expiry_date")
+            checks.append({"check": "insurance_card", "passed": True,
+                           "detail": f"{d['file_name']} is valid" + (f" until {expiry}" if expiry else " (no expiry date on the card)")})
 
     passed = not fail
     confidence = 0.95 if fail else (0.5 if not names else 0.9)
     summary = ("failed: " + ", ".join(dict.fromkeys(fail))) if fail else \
         ("uncertain: no name to check" if not names else
          f"passed: {member['member_id']} ({member['full_name']})" if member else f"passed: '{matched_name}' is a member")
+    if review:
+        summary += "; insurance card not valid: needs human review"
     return {
         "kyc_passed": passed,
+        "needs_review": bool(review),
+        "review_reasons": review,
         "flags": list(dict.fromkeys(fail + flags)),
-        "fail_reasons": [c["detail"] for c in checks if c["passed"] is False],
+        "fail_reasons": [c["detail"] for c in checks if c["passed"] is False and c["check"] == "member_name"],
         "checks": checks,
         "member": member,
+        "insurance_cards": [d["file_name"] for d in cards],
         "confidence": confidence,
         "summary": summary,
     }

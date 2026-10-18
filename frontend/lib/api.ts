@@ -9,12 +9,13 @@ export type DocType =
   | "PRESCRIPTION"
   | "POLICY_AMENDMENT";
 
+// In processing order: ID, claim form, discharge, prescription, policy amendment.
 export const DOC_CATEGORIES: { value: DocType; label: string; folder: string }[] = [
+  { value: "ID_DOCUMENT", label: "ID document", folder: "id_documents" },
   { value: "CLAIM_FORM", label: "Claim form", folder: "claim_forms" },
   { value: "DISCHARGE_SUMMARY", label: "Discharge summary", folder: "discharge_summaries" },
-  { value: "ID_DOCUMENT", label: "ID document", folder: "id_documents" },
-  { value: "POLICY_AMENDMENT", label: "Policy amendment", folder: "policy_amendments" },
   { value: "PRESCRIPTION", label: "Prescription", folder: "prescriptions" },
+  { value: "POLICY_AMENDMENT", label: "Policy amendment", folder: "policy_amendments" },
 ];
 
 export interface CaseSummary {
@@ -26,14 +27,17 @@ export interface CaseSummary {
   confidence: number | null;
   needs_review: boolean;
   patient_id?: string | null;
+  bundle_id?: string | null;   // the claim this page belongs to; null for a standalone upload
   created_by?: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface DashboardStats {
-  total: number;
+  total: number;               // claims (one claim holds several pages)
+  documents?: number;          // pages across all claims
   today: number;
+  documents_today?: number;
   processing: number;
   failed: number;
   approved: number;
@@ -45,6 +49,7 @@ export interface DashboardStats {
   avg_confidence: number | null;
   patients: number;
   review_queue?: number;
+  queue_counts?: Record<"review" | "escalated" | "approved" | "rejected", number>;
 }
 
 export interface Patient {
@@ -196,6 +201,7 @@ export type ClaimStatus =
 /** Why a claim is ON_HOLD: page reading incomplete ("ingest") or an agent failed ("agents"). */
 export interface ClaimHold {
   stage: "ingest" | "agents";
+  step?: "classify" | "extract";   // ingest only: held after classifying every page, or after reading
   reasons: string[];
   pages?: { doc_id: string; file_name: string; reason: string }[];
   action?: "continue" | "stop";
@@ -253,11 +259,13 @@ export interface ClaimResult {
   awaiting_human?: boolean;    // the run is paused for a person (hold or human_review)
   awaiting?: "ingest_hold" | "human_review" | null;
   hold?: ClaimHold | null;
+  resume?: { from?: string; thread_id?: string } | null;   // set by a stop: where resume picks up
   review?: ClaimOverride | null;
   plan?: { agents: string[]; document_counts: Record<string, number>; unknown_documents: string[]; missing_required: string[] };
-  kyc?: { kyc_passed: boolean; flags: string[]; checks: KycCheck[]; reference_date: string; confidence: number; summary: string; error?: string;
+  kyc?: { kyc_passed: boolean; needs_review?: boolean; review_reasons?: string[]; flags: string[]; checks: KycCheck[]; reference_date: string; confidence: number; summary: string; error?: string;
     member?: { member_id: string; full_name: string; policy_number: string } | null };
-  claims?: { schema_valid: boolean; schema_errors: string[]; summary: string; confidence: number; error?: string;
+  claims?: { summary: string; confidence: number; error?: string;
+    policy_brief?: { cpt_codes: string[]; icd10_codes: string[]; claim_amount?: number | null; service_date?: string | null; medications: string[] };
     claim?: { file_name: string; extracted_fields: Record<string, unknown> } | null };
   policy?: { covered: boolean; exclusions: string[]; policy_clause: string; plan: string; sources: string[]; notes: string[];
     cpt_codes_checked: string[]; confidence: number; error?: string };
@@ -333,9 +341,14 @@ export function resolveHold(id: string, action: "continue" | "stop", note?: stri
   return call<ClaimBundle>(`/claim-bundles/${id}/hold`, jsonInit("POST", { action, note }));
 }
 
-// Stop a claim; a running one stops before its next agent starts.
+// Stop a claim at once; a running one abandons its model call in flight.
 export function stopClaim(id: string, note?: string) {
-  return call<ClaimBundle & { stop: "STOPPING" | "STOPPED" }>(`/claim-bundles/${id}/stop`, jsonInit("POST", { note }));
+  return call<ClaimBundle & { stop: "STOPPED" }>(`/claim-bundles/${id}/stop`, jsonInit("POST", { note }));
+}
+
+// Resume a stopped claim from where it stopped (its last finished step).
+export function resumeClaim(id: string) {
+  return call<ClaimBundle & { resume: string }>(`/claim-bundles/${id}/resume`, jsonInit("POST", {}));
 }
 
 // Re-upload one page of the claim (an UNKNOWN or unreadable one), then the claim re-runs.
@@ -377,6 +390,27 @@ export function createClaimBundle(input: { title: string; items: BundleItem[]; p
     form.append("categories", item.category);
   });
   return call<ClaimBundle>("/claim-bundles", { method: "POST", body: form });
+}
+
+export interface ClaimRequirements {
+  required_documents: DocType[];
+  max_files: number;
+  max_pages: number;
+  /** Words in a file name that point to a document type (rules: filename_hints). */
+  filename_hints: Partial<Record<DocType, string[]>>;
+  /** Regex for the patient reference (insurance member ID) in a file name, e.g. PT_\d+. */
+  patient_ref_pattern: string;
+}
+
+export interface PatientRef {
+  member_id: string;
+  status: "registered" | "new" | "unknown";
+  patient: { patient_id: string; full_name: string } | null;
+  member: { full_name: string; policy_number: string | null } | null;
+}
+
+export function resolvePatientRef(memberId: string) {
+  return call<PatientRef>(`/claim-bundles/patient-ref/${encodeURIComponent(memberId)}`);
 }
 
 export function uploadPolicy(file: File) {

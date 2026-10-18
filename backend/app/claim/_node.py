@@ -12,25 +12,33 @@ from __future__ import annotations
 
 import functools
 import time
+from contextvars import ContextVar
 from typing import Any, Callable
 
-from app import audit
+from app import audit, llm
 from app.claim.state import ClaimState, TraceEvent
 
 AUDIT_KEYS = ("error", "decision", "confidence", "kyc_passed", "flags", "fail_reasons", "covered", "exclusions",
-              "schema_valid", "schema_errors", "fraud_score", "risk_level", "tags", "agents", "justification",
+              "needs_review", "review_reasons", "fraud_score", "risk_level", "tags", "agents", "justification",
               "reasons", "unknown_documents", "missing_required", "document_counts", "plan",
               "doc_type", "classified_as", "file_name", "read_confidence", "classifier_confidence",
               "classifier_source", "image_quality", "is_blurry", "blur_variance", "text_chars",
-              "fields_extracted", "fields_marked_missing", "skipped", "action", "note")
+              "fields_extracted", "fields_marked_missing", "skipped", "action", "note", "step", "text_quality",
+              "insurance_cards")
 
 
-class ClaimCancelled(Exception):
-    """A person stopped the claim; raised before the next agent starts."""
+class ClaimCancelled(BaseException):
+    """A person stopped the claim. Raised before an agent starts and, while a model call is in
+    flight, from inside it. A BaseException, so an agent's `except Exception` cannot turn the
+    stop into an ordinary agent error."""
 
 
 # Set by the claim service: claim_id -> True when a person asked to stop that claim.
 _cancel_check: Callable[[str | None], bool] = lambda _claim_id: False
+
+# The claim this thread is working on. Set by the claim service around a run; LangGraph copies
+# it into the threads that run parallel agents, and app.llm into its request threads.
+current_claim: ContextVar[str | None] = ContextVar("current_claim", default=None)
 
 
 def set_cancel_check(check: Callable[[str | None], bool]) -> None:
@@ -41,6 +49,15 @@ def set_cancel_check(check: Callable[[str | None], bool]) -> None:
 def check_cancelled(state: ClaimState) -> None:
     if _cancel_check(state.get("claim_id")):
         raise ClaimCancelled(state.get("claim_id"))
+
+
+def _cancel_current() -> None:
+    claim_id = current_claim.get()
+    if claim_id is not None and _cancel_check(claim_id):
+        raise ClaimCancelled(claim_id)
+
+
+llm.set_cancel_hook(_cancel_current)                  # a stop also ends a model call in flight
 
 
 def fmt_duration(ms: int) -> str:
@@ -70,21 +87,18 @@ def describe(agent: str, out: dict) -> str:
         return f"nothing, skipped because an earlier step failed on this page ({out.get('error')})"
     if "error" in out:
         return f"FAILED: {out['error']}"
-    if agent == "preprocess":
-        blur = out.get("blur_variance")
-        return (f"{out.get('text_chars', 0):,} characters of text; image {out.get('image_quality', 'clear')}; "
-                f"blur variance {blur} ({'blurry' if out.get('is_blurry') else 'sharp'}); "
-                f"read confidence {_pct(out.get('read_confidence'))}")
     if agent == "classify":
+        blur = (f"; image {out.get('image_quality', 'clear')}, blur variance {out.get('blur_variance')} "
+                f"({'blurry' if out.get('is_blurry') else 'sharp'})")
         if out.get("classifier_source") == "human_override":
-            return f"type {out.get('doc_type')} set by a reviewer (classifier skipped)"
+            return f"type {out.get('doc_type')} set by a reviewer (classifier skipped)" + blur
         raw = out.get("classified_as")
         below = raw and raw != out.get("doc_type")
         return (f"type {out.get('doc_type')} at {_pct(out.get('classifier_confidence'))} confidence"
-                + (f" (model said {raw}, below the confidence threshold)" if below else "")
-                + ("; the model also judged the image not clear" if out.get("is_blurry") else ""))
+                + (f" (model said {raw}, below the confidence threshold)" if below else "") + blur)
     if agent == "extract":
-        return (f"{len(out.get('fields_extracted') or [])} field(s) read: {_join(out.get('fields_extracted'))}; "
+        return (f"{out.get('text_chars', 0):,} characters of text (image {out.get('text_quality', 'clear')}); "
+                f"{len(out.get('fields_extracted') or [])} field(s) read: {_join(out.get('fields_extracted'))}; "
                 f"marked missing on the page: {_join(out.get('fields_marked_missing'))}")
     if agent == "plan":
         counts = out.get("document_counts") or {}
@@ -94,11 +108,10 @@ def describe(agent: str, out: dict) -> str:
     if agent == "kyc":
         member = (out.get("member") or {}).get("member_id")
         return (f"KYC {'passed' if out.get('kyc_passed') else 'failed'}; member {member or 'not found'}; "
-                f"flags: {_join(out.get('flags'))}; confidence {_pct(out.get('confidence'))}")
+                + (f"needs review: {_join(out.get('review_reasons'))}; " if out.get("needs_review") else "")
+                + f"flags: {_join(out.get('flags'))}; confidence {_pct(out.get('confidence'))}")
     if agent == "claims":
-        return (f"schema {'valid' if out.get('schema_valid') else 'invalid'}"
-                + (f" ({_join(out.get('schema_errors'))})" if out.get("schema_errors") else "")
-                + f"; confidence {_pct(out.get('confidence'))}")
+        return f"{out.get('summary', '')}; confidence {_pct(out.get('confidence'))}"
     if agent == "policy":
         return (f"{'covered' if out.get('covered') else 'NOT covered'} under {out.get('plan') or 'unknown plan'}; "
                 f"exclusions: {_join(out.get('exclusions'))}; confidence {_pct(out.get('confidence'))}")
