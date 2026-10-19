@@ -1,53 +1,34 @@
 import Link from "next/link";
 import AutoRefresh from "@/components/AutoRefresh";
-import Badge from "@/components/Badge";
+import ClaimRow from "@/components/ClaimRow";
 import KpiCard from "@/components/KpiCard";
 import Pager from "@/components/Pager";
-import { CaseSummary, DashboardStats } from "@/lib/api";
+import { ClaimBundle, DashboardStats, Patient } from "@/lib/api";
 import { pageOf, slicePage } from "@/lib/paging";
 import { serverApi } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
-// Each tab filters on the decision, or on the processing status for in-flight and failed cases.
+// One row per case (claim bundle). Each tab filters on the claim's decision, or on its
+// processing status for in-flight and failed cases.
+const statusOf = (c: ClaimBundle) => c.status ?? c.summary.status;
+const decisionOf = (c: ClaimBundle) => c.decision ?? c.summary.decision;
+
 const TABS = [
-  { key: "ESCALATE", label: "Escalated", hint: "Needs a human decision", match: (c: CaseSummary) => c.decision === "ESCALATE" },
-  { key: "REJECT", label: "Rejected", hint: "Failed KYC, schema, or coverage", match: (c: CaseSummary) => c.decision === "REJECT" },
-  { key: "APPROVE", label: "Approved", hint: "All applicable checks passed", match: (c: CaseSummary) => c.decision === "APPROVE" },
-  { key: "PROCESSING", label: "Processing", hint: "Still being read and checked", match: (c: CaseSummary) => c.status === "PROCESSING" },
-  { key: "FAILED", label: "Failed", hint: "Could not be processed; retry from the case", match: (c: CaseSummary) => c.status === "FAILED" },
+  { key: "ESCALATE", label: "Escalated", hint: "Needs a human decision", match: (c: ClaimBundle) => decisionOf(c) === "ESCALATE" || statusOf(c) === "NEEDS_REVIEW" },
+  { key: "REJECT", label: "Rejected", hint: "Failed KYC, schema, or coverage", match: (c: ClaimBundle) => decisionOf(c) === "REJECT" },
+  { key: "APPROVE", label: "Approved", hint: "All applicable checks passed", match: (c: ClaimBundle) => decisionOf(c) === "APPROVE" },
+  { key: "PROCESSING", label: "Processing", hint: "Still being read and checked", match: (c: ClaimBundle) => statusOf(c) === "PROCESSING" || statusOf(c) === "QUEUED" },
+  { key: "FAILED", label: "Failed", hint: "Could not be processed; retry from the case", match: (c: ClaimBundle) => statusOf(c) === "FAILED" },
   { key: "ALL", label: "All", hint: "Every case, newest first", match: () => true },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
-// A coloured bar on the left of rows that need a person: amber for escalated, red for failed.
-// The badges in the row carry the same meaning in text, so colour is never the only cue.
-function rowAccent(c: CaseSummary): string | null {
-  if (c.status === "FAILED") return "bg-rose-500";
-  if (c.decision === "ESCALATE" || c.needs_review) return "bg-amber-400";
-  return null;
-}
-
-// A page uploaded as part of a claim opens that claim (agent run, documents, audit log);
-// a standalone upload has no claim, so it opens its own document page.
-function openHref(c: CaseSummary): string {
-  return c.bundle_id ? `/bundles/${c.bundle_id}` : `/cases/${c.case_id}`;
-}
-
-function fmtDate(iso: string) {
-  return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-function Confidence({ value }: { value: number | null }) {
-  if (value == null) return <span className="text-slate-400">—</span>;
-  return (
-    <div className="inline-flex items-center gap-2">
-      <span className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-200">
-        <span className="block h-full rounded-full bg-brand-500" style={{ width: `${Math.round(value * 100)}%` }} />
-      </span>
-      <span className="tabular-nums">{value.toFixed(2)}</span>
-    </div>
-  );
+// The claim's confidence; before the claim is decided, the lowest page confidence.
+function confidenceOf(c: ClaimBundle): number | null {
+  if (c.confidence != null) return c.confidence;
+  const pages = c.documents.map((d) => d.confidence).filter((v): v is number => v != null);
+  return pages.length ? Math.min(...pages) : null;
 }
 
 export default async function CasesPage({ searchParams }: { searchParams: Promise<{ tab?: string; q?: string; page?: string }> }) {
@@ -56,17 +37,24 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
   const page = pageOf(sp);
   const term = (q ?? "").trim().toLowerCase();
   const active: TabKey = TABS.some((t) => t.key === tab) ? (tab as TabKey) : "ESCALATE";
-  const [all, stats] = await Promise.all([
-    serverApi<CaseSummary[]>("/api/cases"),
+  const [all, stats, patients] = await Promise.all([
+    serverApi<ClaimBundle[]>("/api/claim-bundles?limit=1000"),   // the API caps this at LIST_LIMIT_MAX
     serverApi<DashboardStats>("/api/dashboard/stats"),
+    serverApi<Patient[]>("/api/patients"),
   ]);
+  const names = new Map(patients.map((p) => [p.patient_id, p]));
   const tabDef = TABS.find((t) => t.key === active)!;
   const matching = all
     .filter(tabDef.match)
-    .filter((c) => !term || c.file_name.toLowerCase().includes(term) || c.case_id.startsWith(term));
+    .filter((c) => {
+      if (!term) return true;
+      const p = c.patient_id ? names.get(c.patient_id) : undefined;
+      return c.title.toLowerCase().includes(term) || c.bundle_id.startsWith(term)
+        || !!p?.full_name?.toLowerCase().includes(term) || !!p?.member_id?.toLowerCase().includes(term);
+    });
   const { rows, hasNext, total } = slicePage(matching, page);       // the tab counts need every row; show one page
   const count = (t: (typeof TABS)[number]) => all.filter(t.match).length;
-  const busy = all.some((c) => c.status === "PROCESSING");
+  const busy = all.some((c) => statusOf(c) === "PROCESSING" || statusOf(c) === "QUEUED");
   const pct = (v: number | null) => (v == null ? "—" : `${Math.round(v * 100)}%`);
 
   return (
@@ -90,7 +78,7 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
             <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.3-4.3M10.5 18a7.5 7.5 0 110-15 7.5 7.5 0 010 15z" />
             </svg>
-            <input name="q" defaultValue={q ?? ""} placeholder="Search file name or case ID" aria-label="Search cases"
+            <input name="q" defaultValue={q ?? ""} placeholder="Search case, ID or patient" aria-label="Search cases"
               className="input w-64 pl-9" />
           </form>
         </div>
@@ -152,65 +140,29 @@ export default async function CasesPage({ searchParams }: { searchParams: Promis
             </div>
             <p className="text-sm font-medium text-slate-700">{term ? `No cases match “${q?.trim()}”` : "No cases in this view"}</p>
             <p className="text-xs text-slate-500">
-              {term ? <Link href={`/?tab=${active}`} className="font-medium text-brand-700 hover:underline">Clear search</Link> : "Uploaded documents appear here once processing starts."}
+              {term ? <Link href={`/?tab=${active}`} className="font-medium text-brand-700 hover:underline">Clear search</Link> : "New cases appear here once they are uploaded."}
             </p>
           </div>
         ) : (
           <>
-            {/* Phones and tablets: one card per case */}
-            <ul className="divide-y divide-slate-100 md:hidden">
-              {rows.map((c, i) => (
-                <li key={c.case_id} className="relative animate-fade-up px-4 py-4" style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}>
-                  {rowAccent(c) && <span className={`absolute inset-y-3 left-0 w-1 rounded-r-full ${rowAccent(c)}`} aria-hidden />}
-                  <Link href={openHref(c)} className="block active:bg-slate-50">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="min-w-0 truncate text-sm font-semibold text-slate-900">{c.file_name}</p>
-                      <Badge value={c.decision ?? c.status} />
-                    </div>
-                    <p className="mt-1 text-xs capitalize text-slate-500">
-                      {c.doc_type?.replaceAll("_", " ").toLowerCase() ?? "unclassified"} · {fmtDate(c.created_at)}
-                    </p>
-                    <div className="mt-2 text-xs text-slate-600"><Confidence value={c.confidence} /></div>
-                  </Link>
-                </li>
-              ))}
+            {/* Same rows as the queues (Review, Escalated, Approved, Rejected) */}
+            <ul className="flex flex-col gap-2 px-4 pb-2 sm:px-6">
+              {rows.map((c, i) => {
+                const conf = confidenceOf(c);
+                return (
+                  <li key={c.bundle_id} className="animate-fade-up" style={{ animationDelay: `${Math.min(i, 12) * 30}ms` }}>
+                    <ClaimRow claim={c} patient={c.patient_id ? names.get(c.patient_id) : undefined} status={statusOf(c)}
+                      subtitle={<>
+                        <span className="font-mono">{c.bundle_id.slice(0, 8)}</span>
+                        {" · "}{c.summary.documents} {c.summary.documents === 1 ? "document" : "documents"}
+                        {c.summary.failed > 0 && <span className="text-rose-600"> · {c.summary.failed} failed</span>}
+                        {decisionOf(c) && <> · agents: {decisionOf(c)!.toLowerCase()}</>}
+                        {conf != null && <> · conf {Math.round(conf * 100)}%</>}
+                      </>} />
+                  </li>
+                );
+              })}
             </ul>
-
-            {/* Desktop: full table */}
-            <div className="hidden overflow-x-auto md:block">
-              <table className="min-w-full divide-y divide-slate-200">
-                <thead className="bg-slate-50/70">
-                  <tr>
-                    <th className="th">File</th>
-                    <th className="th">Document</th>
-                    <th className="th">Decision</th>
-                    <th className="th">Status</th>
-                    <th className="th text-right">Confidence</th>
-                    <th className="th">Received</th>
-                    <th className="th"><span className="sr-only">Open</span></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {rows.map((c, i) => (
-                    <tr key={c.case_id} style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}
-                      className="animate-fade-up transition-colors duration-150 hover:bg-brand-50/50">
-                      <td className="td relative max-w-xs truncate font-medium text-slate-900">
-                        {rowAccent(c) && <span className={`absolute inset-y-2 left-0 w-1 rounded-r-full ${rowAccent(c)}`} aria-hidden />}
-                        <Link href={openHref(c)} className="hover:text-brand-700 hover:underline">{c.file_name}</Link>
-                      </td>
-                      <td className="td capitalize text-slate-600">{c.doc_type?.replaceAll("_", " ").toLowerCase() ?? "—"}</td>
-                      <td className="td"><Badge value={c.decision} /></td>
-                      <td className="td"><Badge value={c.status} /></td>
-                      <td className="td text-right"><Confidence value={c.confidence} /></td>
-                      <td className="td whitespace-nowrap text-slate-500">{fmtDate(c.created_at)}</td>
-                      <td className="td text-right">
-                        <Link href={openHref(c)} className="btn-ghost text-brand-700">Open <span aria-hidden>→</span></Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
             <Pager path="/" params={{ tab: active, q }} page={page} hasNext={hasNext} shown={rows.length} total={total}
               className="border-t border-slate-100 px-4 pb-3 sm:px-6" />
           </>

@@ -12,6 +12,9 @@ LangGraph wiring for one claim (all documents uploaded together).
       -> ingest_hold                            only if a page could not be read and no person has
                                                 looked at this run yet
       -> plan                                   (orchestrator: which agents apply)
+      -> duplicate_check                        checkpoint, no model call: the patient already has a stored
+                                                claim with the same DOS and amount -> decide directly
+                                                (agents skipped), which escalates it to human_review
            -> kyc ................................           -> claims -> policy (claim form only) ---> fraud (deferred) -> decide (deferred)
       plan -> decide directly when no page could be routed
       decide -> human_review (ESCALATE only)    interrupt(): the run pauses at a checkpoint
@@ -34,6 +37,7 @@ from app.claim.agents import (
     claims_agent, classify_agent, decide_agent, extract_agent, fraud_agent, human_review_agent,
     kyc_agent, plan_agent, policy_agent,
 )
+from app.claim.duplicate import duplicate_check
 from app.claim.hold import classify_problems, ingest_hold_agent, read_problems
 from app.claim.state import ClaimState
 
@@ -63,9 +67,18 @@ def route_after_hold(state: ClaimState) -> str:
     return "plan" if len(state.get("docs") or []) >= len(state.get("documents") or []) else "extract"
 
 
-def route_after_plan(state: ClaimState):
-    agents = [a for a in (state.get("plan") or {}).get("agents", []) if a in ("kyc", "claims")]
-    return agents or "decide"
+def _planned_agents(state: ClaimState) -> list[str]:
+    return [a for a in (state.get("plan") or {}).get("agents", []) if a in ("kyc", "claims")]
+
+
+def route_after_plan(state: ClaimState) -> str:
+    return "duplicate_check" if _planned_agents(state) else "decide"
+
+
+def route_after_duplicate(state: ClaimState):
+    if (state.get("duplicate") or {}).get("is_duplicate"):
+        return "decide"
+    return _planned_agents(state) or "decide"
 
 
 def route_after_claims(state: ClaimState) -> str:
@@ -84,6 +97,7 @@ def build_claim_graph(checkpointer=None):
     g.add_node("extract", extract_agent)
     g.add_node("ingest_hold", ingest_hold_agent)
     g.add_node("plan", plan_agent)
+    g.add_node("duplicate_check", duplicate_check)
     g.add_node("kyc", kyc_agent)
     g.add_node("claims", claims_agent)
     g.add_node("policy", policy_agent)
@@ -95,7 +109,8 @@ def build_claim_graph(checkpointer=None):
     g.add_conditional_edges("classify", route_after_classify, ["classify", "ingest_hold", "extract"])
     g.add_conditional_edges("extract", route_after_extract, ["extract", "ingest_hold", "plan"])
     g.add_conditional_edges("ingest_hold", route_after_hold, ["extract", "plan", END])
-    g.add_conditional_edges("plan", route_after_plan, ["kyc", "claims", "decide"])
+    g.add_conditional_edges("plan", route_after_plan, ["duplicate_check", "decide"])
+    g.add_conditional_edges("duplicate_check", route_after_duplicate, ["kyc", "claims", "decide"])
     g.add_conditional_edges("claims", route_after_claims, ["policy", "fraud"])
     g.add_edge("kyc", "fraud")
     g.add_edge("policy", "fraud")

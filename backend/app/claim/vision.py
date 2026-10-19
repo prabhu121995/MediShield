@@ -117,7 +117,24 @@ def extract(text: str, doc_type: str, rules: dict | None = None) -> dict[str, An
     prompt = extract_prompt(doc_type, rules)
     raw = _cached("fields", [text.encode(), config.MODEL_NAME.encode(), prompt.encode()],
                   config.MODEL_NAME, lambda: chat_json(prompt, text))
-    return normalize_fields(raw, doc_type, rules)
+    out = normalize_fields(raw, doc_type, rules)
+    if "policy_number" in out["fields"]:
+        out["fields"]["policy_number"] = policy_number(out["fields"]["policy_number"], text, rules)
+    return out
+
+
+def policy_number(value: str | None, text: str, rules: dict) -> str | None:
+    """The page's policy number: a plan prefix (rules: plans_by_policy_prefix) and digits, e.g.
+    MED-GLD-1954280. Anything else the model put in the field (a UB-04 group number such as
+    GRP-76562) is dropped for the one policy number the page prints, or None."""
+    prefixes = list(rules.get("plans_by_policy_prefix") or {})
+    if not prefixes:
+        return value
+    pattern = re.compile("(?:" + "|".join(map(re.escape, prefixes)) + r")\d+", re.I)
+    if value and pattern.fullmatch(value):
+        return value
+    printed = {m.upper() for m in pattern.findall(text)}
+    return printed.pop() if len(printed) == 1 else None
 
 
 # ---- type coercion ---------------------------------------------------------------------

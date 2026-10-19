@@ -27,7 +27,7 @@ export interface PageProgress {
   doc_id: string;
   file_name: string;
   state: StageState;
-  step?: string;               // the step running on this page: classify | extract (preprocess + extract)
+  step?: string;               // the step running on this page: classify | preprocess | extract
   doc_type?: string;
   blurry?: boolean;
   steps: Record<string, PageStep>;
@@ -40,10 +40,10 @@ export interface Progress {
   pages: PageProgress[];
 }
 
-export const PAGE_STEPS = ["classify", "extract"] as const;
+export const PAGE_STEPS = ["classify", "preprocess", "extract"] as const;
 const LABELS: Record<string, string> = {
-  classify: "Classify", extract: "Preprocess + extract", ingest_hold: "Hold (person)",
-  plan: "Plan", kyc: "KYC", claims: "Claims", policy: "Policy", fraud: "Fraud", decide: "Decision",
+  classify: "Classify", preprocess: "Preprocess", extract: "Preprocess + extract", ingest_hold: "Hold (person)",
+  plan: "Plan", kyc: "KYC", claims: "Claims", duplicate_check: "Duplicate check", policy: "Policy", fraud: "Fraud", decide: "Decision",
   human_review: "Human review",
 };
 
@@ -57,7 +57,7 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
     run.filter((e) => e.event === "agent_started" && e.actor === agent && (doc === undefined || e.doc_id === doc));
   const lastTime = run.at(-1)?.created_at;
 
-  // ---- pages: every page is classified first, then each is preprocessed + extracted ----
+  // ---- pages: every page is classified first, then each is preprocessed (image -> text), then extracted ----
   const pages: PageProgress[] = documents.map((d) => {
     const steps: Record<string, PageStep> = {};
     for (const s of PAGE_STEPS) {
@@ -67,7 +67,12 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
       else if (go && running) steps[s] = { state: "running", startedAt: go.created_at };
       else steps[s] = { state: "waiting" };
     }
-    const runningStep = PAGE_STEPS.find((s) => steps[s].state === "running");
+    // Preprocess runs inside the extract step (one card, "Preprocess + extract") and writes its
+    // own rows, so the card can say which half is running. Older runs have none.
+    if (!begun("preprocess", d.case_id).length && !completed("preprocess", d.case_id).length) {
+      steps.preprocess = { ...steps.extract, durationMs: undefined };
+    }
+    const runningStep = (["classify", "extract"] as const).find((s) => steps[s].state === "running");
     const extracted = steps.extract.state === "done" || steps.extract.state === "error";
     const docType = (steps.classify.detail?.doc_type ?? steps.extract.detail?.doc_type) as string | undefined;
     const failed = PAGE_STEPS.some((s) => steps[s].state === "error");
@@ -94,7 +99,8 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
     const finished = pages.filter((p) => ["done", "error"].includes(p.steps[key].state)).length;
     const errors = pages.filter((p) => p.steps[key].state === "error").length;
     const live = pages.find((p) => p.steps[key].state === "running");
-    const durationMs = pages.reduce((sum, p) => sum + (p.steps[key].durationMs ?? 0), 0);
+    const timed = pages.some((p) => p.steps[key].durationMs != null);      // older runs: preprocess is untimed
+    const durationMs = timed ? pages.reduce((sum, p) => sum + (p.steps[key].durationMs ?? 0), 0) : undefined;
     if (n > 0 && finished === n) {
       return { key, label: LABELS[key], state: errors ? "error" : "done", durationMs,
                note: errors ? `${finished}/${n} pages · ${errors} failed` : `${finished}/${n} pages` };
@@ -125,12 +131,12 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
   const finished = (s: Stage) => ["done", "error", "skipped"].includes(s.state);
   const blocked = Boolean(hold && hold.state === "hold") || (holdDone?.detail?.action === "stop");
 
-  const stage = (key: string, ready: boolean, applies: boolean | null): Stage => {
+  const stage = (key: string, ready: boolean, applies: boolean | null, skipNote = "not applicable"): Stage => {
     const e = completed(key).at(-1);
     if (e) return { key, label: LABELS[key], state: e.status === "error" ? "error" : "done", note: fmtMs(e.duration_ms ?? 0),
                     durationMs: e.duration_ms ?? 0, detail: e.detail };
     if (blocked) return { key, label: LABELS[key], state: "waiting", note: "on hold" };
-    if (applies === false) return { key, label: LABELS[key], state: "skipped", note: "not applicable" };
+    if (applies === false) return { key, label: LABELS[key], state: "skipped", note: skipNote };
     const go = begun(key).at(-1);
     if (running && (go || ready)) return { key, label: LABELS[key], state: "running", note: "running…", startedAt: go?.created_at ?? lastTime };
     return { key, label: LABELS[key], state: "waiting", note: "waiting" };
@@ -138,11 +144,17 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
 
   const plan = stage("plan", allRead && (!heldAt || Boolean(holdDone)), null);
   const planDone = plan.state === "done";
-  const kyc = stage("kyc", planDone, planned ? planned.includes("kyc") : null);
-  const claims = stage("claims", planDone, planned ? planned.includes("claims") : null);
-  const policy = stage("policy", finished(claims), planned ? planned.includes("claims") && hasClaimForm : null);
-  const fraud = stage("fraud", planDone && [kyc, claims, policy].every(finished), planned ? planned.length > 0 : null);
-  const decide = stage("decide", planDone && finished(fraud), null);
+  // The duplicate checkpoint runs before any agent; a duplicate skips them all and goes to decide.
+  const duplicate = stage("duplicate_check", planDone, planned ? planned.length > 0 : null);
+  const isDuplicate = completed("duplicate_check").at(-1)?.detail?.is_duplicate === true;
+  const DUP = "skipped: duplicate claim";
+  const agent = (applies: boolean | null) => (isDuplicate ? false : applies);
+  const checked = finished(duplicate);
+  const kyc = stage("kyc", checked, agent(planned ? planned.includes("kyc") : null), DUP);
+  const claims = stage("claims", checked, agent(planned ? planned.includes("claims") : null), DUP);
+  const policy = stage("policy", finished(claims), agent(planned ? planned.includes("claims") && hasClaimForm : null), DUP);
+  const fraud = stage("fraud", checked && [kyc, claims, policy].every(finished), agent(planned ? planned.length > 0 : null), DUP);
+  const decide = stage("decide", planDone && (isDuplicate || finished(fraud)), null);
 
   const decided = completed("decide").at(-1)?.detail?.decision as string | undefined;
   const reviewDone = completed("human_review").at(-1);
@@ -155,8 +167,8 @@ export function claimProgress(events: AuditEvent[], documents: CaseSummary[], ru
 
   const heldAfterClassify = (hold?.detail?.step ?? heldAt?.detail?.step) !== "extract";
   const stages = heldAfterClassify
-    ? [cls, ...(hold ? [hold] : []), ext, plan, kyc, claims, policy, fraud, decide, human]
-    : [cls, ext, ...(hold ? [hold] : []), plan, kyc, claims, policy, fraud, decide, human];
+    ? [cls, ...(hold ? [hold] : []), ext, plan, duplicate, kyc, claims, policy, fraud, decide, human]
+    : [cls, ext, ...(hold ? [hold] : []), plan, duplicate, kyc, claims, policy, fraud, decide, human];
   return { running, current: stages.find((s) => s.state === "running") ?? null, stages, pages };
 }
 

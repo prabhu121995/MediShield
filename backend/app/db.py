@@ -455,6 +455,23 @@ def insert_bundle(bundle_id: str, title: str, patient_id: str | None, created_by
              "VALUES (%s,%s,%s,%s,%s)", (bundle_id, title, patient_id, created_by, created_by))
 
 
+_CASE_NO = re.compile(r"^C_?(\d+)")
+
+
+def next_case_no() -> str:
+    """The next case number for an untitled claim (C001, C002, ...): one past the highest
+    case number any claim title starts with."""
+    rows = _fetch("SELECT title FROM claim_bundle WHERE title REGEXP '^C_?[0-9]+'", ())
+    top = max((int(m.group(1)) for r in rows if (m := _CASE_NO.match(r["title"]))), default=0)
+    return f"C{top + 1:03d}"
+
+
+def add_case_patient(bundle_id: str, member_id: str) -> None:
+    """Append the member ID to a claim still titled with its bare case number (C002 -> C002_PT_20745)."""
+    _execute("UPDATE claim_bundle SET title=CONCAT(title, '_', %s) WHERE bundle_id=%s AND title REGEXP '^C[0-9]+$'",
+             (member_id, bundle_id))
+
+
 _BUNDLE_COLS = ("bundle_id, title, patient_id, status, decision, confidence, needs_review, "
                 "created_by, created_at, updated_by, updated_at")
 
@@ -477,12 +494,18 @@ def get_bundle(bundle_id: str, with_result: bool = True) -> dict | None:
 
 
 def list_bundles(limit: int = 200, status: str | tuple[str, ...] | None = None, decision: str | None = None,
-                 oldest_first: bool = False, q: str | None = None, offset: int = 0) -> list[dict]:
+                 q: str | None = None, offset: int = 0,
+                 patient_id: str | None = None) -> list[dict]:
     """Claims, newest first, with the queue fields read straight from the stored result
     (justification, reasons, fraud score) so a list never loads full agent outputs.
     `status` is one status or a tuple of them; `q` searches the title, id and patient name;
+    `patient_id` keeps the claims for that patient, or with a page mapped to them;
     `offset` skips that many rows (pagination)."""
     clauses, args = [], []
+    if patient_id:
+        clauses.append("(patient_id=%s OR bundle_id IN "
+                       "(SELECT bundle_id FROM case_record WHERE patient_id=%s AND bundle_id IS NOT NULL))")
+        args.extend([patient_id, patient_id])
     if q:
         clauses.append("(title LIKE %s OR bundle_id LIKE %s OR patient_id IN "
                        "(SELECT patient_id FROM patient WHERE full_name LIKE %s))")
@@ -498,15 +521,36 @@ def list_bundles(limit: int = 200, status: str | tuple[str, ...] | None = None, 
         f"SELECT {_BUNDLE_COLS}, override, "
         "JSON_UNQUOTE(JSON_EXTRACT(result, '$.decision.justification')) AS justification, "
         "JSON_EXTRACT(result, '$.decision.reasons') AS reasons, "
+        "JSON_EXTRACT(result, '$.hold.reasons') AS hold_reasons, "
         "JSON_EXTRACT(result, '$.fraud.fraud_score') AS fraud_score "
-        f"FROM claim_bundle {where} ORDER BY created_at {'ASC' if oldest_first else 'DESC'} LIMIT %s OFFSET %s",
+        f"FROM claim_bundle {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
         (*args, limit, max(0, offset)))
     for r in rows:
-        r["reasons"] = json.loads(r["reasons"]) if r.get("reasons") else []
+        # The reasons that hold now: why it is on hold, else why the agents decided as they did.
+        hold = json.loads(r.pop("hold_reasons") or "null") or []
+        decided = json.loads(r["reasons"]) if r.get("reasons") else []
+        r["reasons"] = hold if r.get("status") == "ON_HOLD" and hold else decided
         r["fraud_score"] = float(r["fraud_score"]) if r.get("fraud_score") not in (None, "null") else None
         if r["justification"] == "null":
             r["justification"] = None
+    _name_claims_in_reasons(rows)
     return [_bundle_row(r) for r in rows]
+
+
+_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+
+
+def _name_claims_in_reasons(rows: list[dict]) -> None:
+    """'duplicate of claim 986e0b47-…' reads 'duplicate of claim C001_PT_19116': one query for
+    every claim id the reasons mention (a deleted claim keeps its short id)."""
+    ids = {m for r in rows for reason in r["reasons"] for m in _UUID_RE.findall(str(reason))}
+    if not ids:
+        return
+    marks = ", ".join(["%s"] * len(ids))
+    titles = {b["bundle_id"]: b["title"] for b in
+              _fetch(f"SELECT bundle_id, title FROM claim_bundle WHERE bundle_id IN ({marks})", tuple(ids))}
+    for r in rows:
+        r["reasons"] = [_UUID_RE.sub(lambda m: titles.get(m.group(), m.group()[:8]), str(x)) for x in r["reasons"]]
 
 
 def count_bundles_by_status() -> dict[str, int]:
@@ -598,6 +642,38 @@ def delete_bundle_documents(bundle_id: str) -> None:
     _execute("DELETE FROM case_record WHERE bundle_id=%s", (bundle_id,))
 
 
+def delete_case(case_id: str) -> None:
+    """Remove one page of a claim (the audit log keeps its history)."""
+    _execute("DELETE FROM case_record WHERE case_id=%s", (case_id,))
+
+
+def checkpoint_threads(claim_id: str) -> list[str]:
+    """The checkpoint threads of every run of a claim (thread ids are '<claim id>:<run>')."""
+    return [r["thread_id"] for r in _fetch("SELECT DISTINCT thread_id FROM lg_checkpoint WHERE thread_id LIKE %s",
+                                           (f"{claim_id}:%",))]
+
+
+def delete_bundle(bundle_id: str) -> None:
+    """Remove a claim: its pages, its stored claim and stays (so a later claim is not checked
+    against it), its checkpoints and the claim row. The audit log keeps its history."""
+    conn = _connect(config.MYSQL_DB)
+    try:
+        conn.begin()                                 # all or nothing: no half-deleted claim
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM case_record WHERE bundle_id=%s", (bundle_id,))
+            cur.execute("DELETE FROM claim WHERE case_id=%s", (bundle_id,))
+            cur.execute("DELETE FROM clinical_event WHERE case_id=%s", (bundle_id,))
+            for table in ("lg_checkpoint", "lg_checkpoint_blob", "lg_checkpoint_write"):
+                cur.execute(f"DELETE FROM {table} WHERE thread_id LIKE %s", (f"{bundle_id}:%",))
+            cur.execute("DELETE FROM claim_bundle WHERE bundle_id=%s", (bundle_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ---- audit log -----------------------------------------------------------------------
 
 def insert_audit_event(e: dict) -> None:
@@ -627,12 +703,19 @@ def list_audit_events(claim_id: str) -> list[dict]:
                               "ORDER BY id", (claim_id,)))
 
 
+def audit_case_scope(case_id: str) -> tuple[str, list]:
+    """The audit rows of one case (claim bundle): its own claim events plus the events of the
+    documents filed under it (entity_type 'case', keyed by the document's case_id)."""
+    return ("(entity_id = %s OR (entity_type = 'case' AND entity_id IN "
+            "(SELECT case_id FROM case_record WHERE bundle_id = %s)))", [case_id, case_id])
+
+
 def search_audit_events(entity_type: str | None = None, entity_id: str | None = None, actor: str | None = None,
                         limit: int = 200, since=None, q: str | None = None, offset: int = 0,
                         event: str | None = None) -> list[dict]:
-    """The audit log across every entity, newest first. `q` searches the event, actor, entity
-    id and detail; `event` keeps one event type (agent_completed = investigation notes);
-    `offset` skips that many rows (pagination)."""
+    """The audit log across every entity, newest first. `entity_id` scopes it to one case
+    (see audit_case_scope); `q` searches the event, actor, entity id and detail; `event` keeps
+    one event type (agent_completed = investigation notes); `offset` skips that many rows."""
     clauses, args = [], []
     if q:
         clauses.append("(event LIKE %s OR actor LIKE %s OR entity_id LIKE %s OR detail LIKE %s)")
@@ -640,7 +723,11 @@ def search_audit_events(entity_type: str | None = None, entity_id: str | None = 
     if since:
         clauses.append("created_at >= %s")
         args.append(since)
-    for col, value in (("entity_type", entity_type), ("entity_id", entity_id), ("actor", actor), ("event", event)):
+    if entity_id:
+        clause, scope_args = audit_case_scope(entity_id)
+        clauses.append(clause)
+        args.extend(scope_args)
+    for col, value in (("entity_type", entity_type), ("actor", actor), ("event", event)):
         if value:
             clauses.append(f"{col}=%s")
             args.append(value)
@@ -798,6 +885,17 @@ def insert_patient(patient_id: str, data: dict, created_by: str) -> None:
     _execute(f"INSERT INTO patient (patient_id, {cols}, created_by, updated_by) "
              f"VALUES (%s, {marks}, %s, %s)",
              (patient_id, *[data.get(c) for c in PATIENT_COLUMNS], created_by, created_by))
+
+
+def patient_usage(patient_id: str) -> dict:
+    """How many claims and pages are linked to a patient (a linked patient is not deleted)."""
+    claims = _fetch("SELECT COUNT(*) AS n FROM claim_bundle WHERE patient_id=%s", (patient_id,))[0]["n"]
+    pages = _fetch("SELECT COUNT(*) AS n FROM case_record WHERE patient_id=%s", (patient_id,))[0]["n"]
+    return {"claims": int(claims), "pages": int(pages)}
+
+
+def delete_patient(patient_id: str) -> None:
+    _execute("DELETE FROM patient WHERE patient_id=%s", (patient_id,))
 
 
 def update_patient(patient_id: str, data: dict, updated_by: str) -> None:

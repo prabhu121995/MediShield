@@ -6,7 +6,7 @@ FastAPI service for the MediShield intake pipeline.
 Access:
   public : /api/health, /api/auth/login
   agent  : cases, patients (list, view, create, edit, upload, review, document image)
-  admin  : policy ingestion, and everything agents can do
+  admin  : policy ingestion, deleting claims, pages and patients, and everything agents can do
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from app import audit, audit_analytics, auth, config, db, log_analytics, logdb, uploads, policy_chat as policy_assistant
+from app import audit, audit_analytics, auth, case_timeline, config, db, log_analytics, logdb, uploads, policy_chat as policy_assistant
 from app.bundles import summarize_bundle
 from app.claim import intake, service as claims_service
 from app.claim.pages import in_processing_order
@@ -239,11 +239,35 @@ def update_patient(patient_id: str, body: PatientIn, user: dict = ANY_USER):
     return db.get_patient(patient_id)
 
 
+@app.delete("/api/patients/{patient_id}", status_code=204)
+def delete_patient(patient_id: str, user: dict = ADMIN_ONLY):
+    """Delete a patient with no claims or pages linked (delete those first). Audited."""
+    patient = db.get_patient(patient_id)
+    if patient is None:
+        raise HTTPException(404, "patient not found")
+    usage = db.patient_usage(patient_id)
+    if usage["claims"] or usage["pages"]:
+        raise HTTPException(409, f"{patient['full_name']} has {usage['claims']} claim(s) and {usage['pages']} page(s) "
+                                 "linked: delete those first")
+    db.delete_patient(patient_id)
+    audit.record_entity("patient", patient_id, user["username"], "patient_deleted",
+                        detail={"full_name": patient["full_name"], "member_id": patient.get("member_id")})
+    return Response(status_code=204)
+
+
 @app.get("/api/patients/{patient_id}/cases")
 def patient_cases(patient_id: str, user: dict = ANY_USER):
     if db.get_patient(patient_id) is None:
         raise HTTPException(404, "patient not found")
     return db.list_cases(patient_id=patient_id)
+
+
+@app.get("/api/patients/{patient_id}/claim-bundles")
+def patient_bundles(patient_id: str, user: dict = ANY_USER):
+    """The patient's claims, newest first, with their pages."""
+    if db.get_patient(patient_id) is None:
+        raise HTTPException(404, "patient not found")
+    return _views(db.list_bundles(patient_id=patient_id, limit=config.LIST_LIMIT_MAX))
 
 
 @app.post("/api/patients/{patient_id}/cases", status_code=202)
@@ -302,11 +326,11 @@ def _views(bundles: list[dict]) -> list[dict]:
     return [_bundle_view(b, pages[b["bundle_id"]]) for b in bundles]
 
 
-# A queue is a filter over claims. Review: escalated, waiting for a person (oldest first).
-# Approved / rejected: the final decision, by the agents or a reviewer's override (newest first).
+# A queue is a filter over claims, newest first. Review / escalated: waiting for a person.
+# Approved / rejected: the final decision, by the agents or a reviewer's override.
 QUEUES = {
-    "review": {"status": ("NEEDS_REVIEW", "ON_HOLD"), "oldest_first": True},
-    "escalated": {"status": "NEEDS_REVIEW", "decision": "ESCALATE", "oldest_first": True},
+    "review": {"status": ("NEEDS_REVIEW", "ON_HOLD")},
+    "escalated": {"status": "NEEDS_REVIEW", "decision": "ESCALATE"},
     "approved": {"decision": "APPROVE"},
     "rejected": {"decision": "REJECT"},
 }
@@ -330,7 +354,7 @@ def claim_queue(name: Literal["review", "escalated", "approved", "rejected"], li
 
 @app.get("/api/review-queue")
 def review_queue(user: dict = ANY_USER):
-    """Escalated claims waiting for ops staff, oldest first."""
+    """Escalated claims waiting for ops staff, newest first."""
     return claim_queue("review", user=user)
 
 
@@ -379,7 +403,7 @@ def audit_log(entity_type: AUDIT_ENTITIES | None = None, entity_id: str | None =
               range: AUDIT_RANGES = "all", limit: int | None = None, q: str | None = None,
               offset: int = Query(0, ge=0), event: AUDIT_EVENTS | None = None, user: dict = ADMIN_ONLY):
     """The audit log across every entity (MySQL table audit_event), newest first. `entity_id`
-    with entity_type=claim narrows it to one claim."""
+    narrows it to one case: its claim events and its documents' events."""
     return db.search_audit_events(entity_type, entity_id, actor, _limit(limit), since=log_analytics.since_of(range),
                                   q=(q or "").strip() or None, offset=offset, event=event)
 
@@ -388,6 +412,16 @@ def audit_log(entity_type: AUDIT_ENTITIES | None = None, entity_id: str | None =
 def audit_claims(user: dict = ADMIN_ONLY):
     """The claims to pick from on the Audit log page (including claims deleted since)."""
     return audit_analytics.audit_claims(config.LIST_LIMIT_MAX)
+
+
+@app.get("/api/audit/case/{case_id}")
+def audit_case(case_id: str, user: dict = ADMIN_ONLY):
+    """One case's audit trail as numbered steps, oldest first, grouped into runs, with the
+    per-agent times: what the Audit log's Steps and Analytics tabs show."""
+    t = case_timeline.case_timeline(case_id)
+    if t is None:
+        raise HTTPException(404, "case not found")
+    return case_timeline.to_json(t)
 
 
 @app.get("/api/audit/stats")
@@ -400,11 +434,14 @@ def audit_stats(range: AUDIT_RANGES = "24h", entity_type: AUDIT_ENTITIES | None 
 @app.get("/api/audit/export.csv")
 def audit_csv(range: AUDIT_RANGES = "24h", entity_type: AUDIT_ENTITIES | None = None, actor: str | None = None,
               event: AUDIT_EVENTS | None = None, entity_id: str | None = None, user: dict = ADMIN_ONLY):
-    """The raw audit events in the current filter, as CSV (at most LOG_EXPORT_MAX_ROWS)."""
+    """The raw audit events in the current filter, as CSV (at most LOG_EXPORT_MAX_ROWS). With
+    `entity_id`, that case's whole trail as numbered steps, oldest first."""
+    if entity_id:
+        return claim_audit_csv(entity_id, user)
     body = audit_analytics.export_csv(range, entity_type, actor, event, entity_id)
     audit.record_entity("user", user["username"], user["username"], "audit_exported",
                         detail={"format": "csv", "range": range, "entity_type": entity_type, "actor": actor,
-                                "event": event})
+                                "event": event, "case": entity_id})
     name = f"medishield-audit-raw-{range}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.csv"
     return Response(body, media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -413,11 +450,14 @@ def audit_csv(range: AUDIT_RANGES = "24h", entity_type: AUDIT_ENTITIES | None = 
 @app.get("/api/audit/report.pdf")
 def audit_pdf(range: AUDIT_RANGES = "24h", entity_type: AUDIT_ENTITIES | None = None, actor: str | None = None,
               event: AUDIT_EVENTS | None = None, entity_id: str | None = None, user: dict = ADMIN_ONLY):
-    """The audit analysis as a PDF report."""
+    """The audit analysis as a PDF report. With `entity_id`, that case's report: its runs and
+    each run's steps in order."""
+    if entity_id:
+        return claim_audit_pdf(entity_id, user)
     body = audit_analytics.report_pdf(range, entity_type, actor, event, entity_id)
     audit.record_entity("user", user["username"], user["username"], "audit_exported",
                         detail={"format": "pdf", "range": range, "entity_type": entity_type, "actor": actor,
-                                "event": event})
+                                "event": event, "case": entity_id})
     name = f"medishield-audit-analysis-{range}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.pdf"
     return Response(body, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -479,24 +519,30 @@ def claim_audit(bundle_id: str, user: dict = ANY_USER):
 
 @app.get("/api/claim-bundles/{bundle_id}/audit/export.csv")
 def claim_audit_csv(bundle_id: str, user: dict = ANY_USER):
-    """One claim's whole audit trail as CSV: every event, oldest first (also for a claim deleted since)."""
-    body = audit_analytics.claim_csv(bundle_id)
-    if len(body.splitlines()) <= 1:                     # the header row only: no such claim
+    """One case's whole audit trail as CSV, one row per step, oldest first (also for a case deleted since)."""
+    t = case_timeline.case_timeline(bundle_id)
+    if t is None:
         raise HTTPException(404, "case not found")
     audit.record(bundle_id, actor=user["username"], event="audit_exported", detail={"format": "csv"})
-    return Response(body, media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="medishield-claim-{bundle_id[:8]}-audit.csv"'})
+    return Response(case_timeline.steps_csv(t), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{_case_file(t, "steps", "csv")}"'})
 
 
 @app.get("/api/claim-bundles/{bundle_id}/audit/report.pdf")
 def claim_audit_pdf(bundle_id: str, user: dict = ANY_USER):
-    """One claim's investigation as a PDF: each agent, what it worked on, when, how long, what it returned."""
-    body = audit_analytics.claim_report_pdf(bundle_id)
-    if body is None:
+    """One case's audit as a PDF: its runs, and each run's steps in order (which agent was called,
+    on what, when, how long it took, what it returned), with a timeline chart per run."""
+    t = case_timeline.case_timeline(bundle_id)
+    if t is None:
         raise HTTPException(404, "case not found")
     audit.record(bundle_id, actor=user["username"], event="audit_exported", detail={"format": "pdf"})
-    return Response(body, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="medishield-claim-{bundle_id[:8]}-investigation.pdf"'})
+    return Response(case_timeline.report_pdf(t), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{_case_file(t, "audit", "pdf")}"'})
+
+
+def _case_file(t: dict, kind: str, ext: str) -> str:
+    title = re.sub(r"[^A-Za-z0-9_-]+", "-", t["case"]["title"])
+    return f"medishield-case-{title}-{kind}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.{ext}"
 
 
 def _store_claim_files(files: list[UploadFile], per_file_types: list[str | None]) -> list[tuple[str, str, str | None]]:
@@ -660,8 +706,8 @@ def create_bundle(title: str = Form(""), files: list[UploadFile] = File(...),
     document type for that file, or empty to let the classifier decide). Each required
     document type (rules: required_documents) must be among them, or nothing is stored. A PDF
     is split into one document per page. Every file is checked before anything is stored."""
-    title = title.strip() or f"Claim {date.today().isoformat()} ({len(files)} document{'s' if len(files) != 1 else ''})"
-    if not 2 <= len(title) <= 160:
+    title = title.strip()
+    if title and not 2 <= len(title) <= 160:
         raise HTTPException(422, "title must be between 2 and 160 characters")
     patient_id = (patient_id or "").strip() or None
     if patient_id and db.get_patient(patient_id) is None:
@@ -709,6 +755,10 @@ def create_bundle(title: str = Form(""), files: list[UploadFile] = File(...),
     stored = _store_claim_files(files, per_file_types)
     if ref and not patient_id:                       # the files name the patient: link it, registering it if new
         patient_id = intake.register_patient(ref, user["username"])
+    if not title:                                    # untitled: the case number, plus the patient's member ID
+        case_no = db.next_case_no()
+        member_id = (db.get_patient(patient_id) or {}).get("member_id") if patient_id else None
+        title = f"{case_no}_{member_id}" if member_id else case_no    # else added once the pages name the patient
 
     # 3. Create the claim and queue it. The claim graph reads the pages one by one.
     bundle_id = claims_service.submit_claim(title, [(p, n, t or None) for p, n, t in stored],
@@ -722,6 +772,31 @@ def get_bundle(bundle_id: str, user: dict = ANY_USER):
     if bundle is None:
         raise HTTPException(404, "case not found")
     return _bundle_view(bundle)
+
+
+@app.delete("/api/claim-bundles/{bundle_id}", status_code=204)
+def delete_bundle(bundle_id: str, user: dict = ADMIN_ONLY):
+    """Delete a claim that is not running, with its pages and files. The audit log keeps it."""
+    try:
+        claims_service.delete_claim(bundle_id, user["username"])
+    except KeyError as exc:
+        raise HTTPException(404, "case not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(status_code=204)
+
+
+@app.delete("/api/claim-bundles/{bundle_id}/documents/{doc_id}", status_code=202)
+def delete_claim_document(bundle_id: str, doc_id: str, user: dict = ADMIN_ONLY):
+    """Delete one page of a claim; the claim re-runs on the pages left."""
+    _claim_for_action(bundle_id)
+    try:
+        claims_service.delete_document(bundle_id, doc_id, user["username"])
+    except KeyError as exc:
+        raise HTTPException(404, f"document {exc.args[0]} is not part of this claim") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return get_bundle(bundle_id, user)
 
 
 @app.get("/api/policies")

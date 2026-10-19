@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { ClaimHold, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, resumeClaim, stopClaim } from "@/lib/api";
+import ConfirmDelete from "@/components/ConfirmDelete";
+import { ClaimHold, deleteClaim, deleteDocument, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, resumeClaim, stopClaim } from "@/lib/api";
 import { allowedFile, MAX_BATCH_FILES, UPLOAD_EXTENSIONS } from "@/lib/settings";
 
 const ACCEPT = UPLOAD_EXTENSIONS.join(",");
@@ -61,6 +62,18 @@ export function ResumeButton({ claimId }: { claimId: string }) {
   );
 }
 
+// Admin only: delete the whole claim, then back to the claims list.
+export function DeleteClaimButton({ claimId }: { claimId: string }) {
+  return <ConfirmDelete label="Delete claim" question="Delete this claim and all its pages? This cannot be undone."
+    action={() => deleteClaim(claimId)} goTo="/bundles" />;
+}
+
+// Admin only: delete one page; the claim re-runs on the pages left.
+export function DeletePageButton({ claimId, docId }: { claimId: string; docId: string }) {
+  return <ConfirmDelete small label="Delete" question="Delete this page and re-run the claim?"
+    action={() => deleteDocument(claimId, docId)} />;
+}
+
 // Re-upload one page: a hidden file input behind a button. The claim re-runs; pages already
 // read come from the model cache, so only the new page costs model time.
 export function ReplacePageButton({ claimId, docId, fileName, label = "Re-upload" }: {
@@ -107,7 +120,7 @@ export function ReplaceAllButton({ claimId }: { claimId: string }) {
 }
 
 // Human in the loop for a claim ON_HOLD. Every page is classified first; an unknown, blurry
-// or failed page stops the claim before any page is read. A person continues, stops or re-uploads.
+// or failed page stops the claim before any page is read. A person re-uploads, restarts or stops.
 export function HoldPanel({ claimId, hold, waitingAtHold }: { claimId: string; hold: ClaimHold; waitingAtHold: boolean }) {
   const { busy, error, run } = useAction();
   const [note, setNote] = useState("");
@@ -120,7 +133,7 @@ export function HoldPanel({ claimId, hold, waitingAtHold }: { claimId: string; h
       </h2>
       <p className="mt-0.5 text-xs">
         {ingest
-          ? `${atClassify ? "No page was read yet and the" : "The"} claim agents (KYC, claims, policy, fraud) did not run. Re-upload the page, re-upload every page, continue with the pages as they are (the claim will be escalated), or stop the claim.`
+          ? `${atClassify ? "No page was read yet and the" : "The"} claim agents (KYC, claims, policy, fraud) did not run. Re-upload the page, re-upload every page, restart the claim from the first page, or stop the claim.`
           : "The claim was not decided on complete information. Re-run it, re-upload the pages, stop it, or record a decision in Human review."}
       </p>
       <ul className="mt-3 space-y-2">
@@ -142,17 +155,12 @@ export function HoldPanel({ claimId, hold, waitingAtHold }: { claimId: string; h
           <label className="min-w-[220px] flex-1 text-xs">
             <span className="mb-1 block font-medium">Note (optional, audited)</span>
             <input className="input py-1.5 text-xs" value={note} onChange={(e) => setNote(e.target.value)}
-              placeholder="Why continue or stop?" maxLength={1000} />
+              placeholder="Why stop?" maxLength={1000} />
           </label>
         )}
-        {ingest && waitingAtHold && (
-          <button type="button" className="btn-primary px-3 py-1.5 text-xs" disabled={busy}
-            onClick={() => run(() => resolveHold(claimId, "continue", note.trim() || undefined))}>Continue anyway</button>
-        )}
-        {!ingest && (
-          <button type="button" className="btn-primary px-3 py-1.5 text-xs" disabled={busy}
-            onClick={() => run(() => rerunClaim(claimId))}>Re-run claim</button>
-        )}
+        {/* A page-reading hold is never continued past: the claim restarts from the first page */}
+        <button type="button" className="btn-primary px-3 py-1.5 text-xs" disabled={busy}
+          onClick={() => run(() => rerunClaim(claimId))}>{ingest ? "Restart claim" : "Re-run claim"}</button>
         <ReplaceAllButton claimId={claimId} />
         <button type="button" disabled={busy}
           className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"

@@ -126,10 +126,26 @@ def classify_agent(state: ClaimState) -> dict:
     return {**update, "classified": [result]}
 
 
+def _preprocess(state: ClaimState, doc: dict, page: dict) -> dict:
+    """The preprocess half of the extract step (vision model: image -> text), with its own
+    audit rows so the UI shows it as a separate agent."""
+    started(state, "preprocess", doc_id=doc["doc_id"], file_name=page.get("file_name"))
+    started_at, t0 = audit.now(), time.perf_counter()
+    try:
+        read = transcribe(doc["file_path"])
+    except Exception as exc:
+        emit(state, "preprocess", started_at, t0, {"file_name": page.get("file_name"),
+             "error": f"preprocess failed: {type(exc).__name__}: {exc}"}, doc_id=doc["doc_id"])
+        raise
+    emit(state, "preprocess", started_at, t0, {"file_name": page.get("file_name")}, doc_id=doc["doc_id"],
+         returned={"text_chars": len(read["text"]), "text_quality": read["image_quality"]})
+    return read
+
+
 def extract_agent(state: ClaimState) -> dict:
     """Preprocess + extract: the page as text, then that type's fields from the text."""
     def work(doc, page):
-        read = transcribe(doc["file_path"])
+        read = _preprocess(state, doc, page)
         out = extract(read["text"], page.get("doc_type") or "UNKNOWN")
         own = {"raw_text": read["text"], "text_chars": len(read["text"]), "text_quality": read["image_quality"],
                **out, "fields_extracted": sorted(k for k, v in (out.get("fields") or {}).items()

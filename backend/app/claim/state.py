@@ -59,6 +59,7 @@ class ClaimState(TypedDict, total=False):
     plan: dict[str, Any]
     kyc: dict[str, Any]
     claims: dict[str, Any]
+    duplicate: dict[str, Any]                           # the duplicate checkpoint: a repeat of a stored claim skips the agents
     policy: dict[str, Any]
     fraud: dict[str, Any]
     decision: dict[str, Any]

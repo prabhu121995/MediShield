@@ -2,7 +2,9 @@
 Orchestrator, second half: the final decision. A deferred LangGraph node, so it runs once,
 after every upstream branch has written its output into the shared state.
 
-    ESCALATE  fraud score >= 0.3 (every fraud signal and flag, incl. missing fields)
+    ESCALATE  the patient already has a stored claim with the same DOS and amount (duplicate;
+              the duplicate_check skipped every agent)
+              OR fraud score >= 0.3 (every fraud signal and flag, incl. missing fields)
               OR the insurance card is not valid (KYC asks for a person)
               OR any agent confidence < 0.6 (a page, kyc, claims, policy, fraud)
               OR an agent errored, a page is UNKNOWN, or a required document is missing
@@ -67,6 +69,9 @@ def decide(state: ClaimState) -> dict:
     confidence = round(sum(weights[k] * c for k, c in ran.items()) / weight, 3) if weight else 0.0
 
     escalate, reject = [], []
+    dup = state.get("duplicate") or {}
+    if dup.get("is_duplicate"):
+        escalate.append(dup.get("summary") or f"duplicate of claim {dup.get('duplicate_of')}")
     for k, s in summaries.items():
         if s["status"] == "error":
             escalate.append(f"{k} agent error: {s['summary']}")

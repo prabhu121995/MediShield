@@ -19,7 +19,7 @@ from app.agents._util import name_tokens
 from app.claim import pages as page_agents, policy as policy_agent
 from app.claim.graph import build_claim_graph, set_claim_graph
 from app.claim.service import run_claim_graph, run_config
-from app.claim.vision import classify_prompt, extract_prompt, normalize_fields
+from app.claim.vision import classify_prompt, extract_prompt, normalize_fields, policy_number
 from app.db import set_repository
 from app.policy_store import set_policy_store
 from tests.test_pipeline import InMemoryRepository
@@ -152,8 +152,8 @@ class ClaimGraphTests(unittest.TestCase):
     def test_every_page_is_classified_before_any_page_is_read(self):
         state = self.run_claim(claim=claim(), id=id_card())
         agents = [e["agent"] for e in state["trace"]]
-        self.assertEqual(agents[:5], ["classify", "classify", "extract", "extract", "plan"])
-        self.assertEqual(set(agents[5:7]), {"kyc", "claims"})              # the parallel super-step
+        self.assertEqual(agents[:6], ["classify", "classify", "extract", "extract", "plan", "duplicate_check"])
+        self.assertEqual(set(agents[6:8]), {"kyc", "claims"})              # the parallel super-step
         self.assertEqual(agents[-3:], ["policy", "fraud", "decide"])
 
     def test_preprocessor_text_is_kept_for_the_ui(self):
@@ -389,6 +389,33 @@ class ClaimGraphTests(unittest.TestCase):
         state = self.run_claim(claim=claim(), claim_dup=claim(), id=id_card())
         self.assertIn("duplicate_claim", state["fraud"]["tags"])
 
+    def test_resubmitted_claim_goes_to_human_review(self):
+        self.repo.claims_rows.append({"case_id": "claim-0", "member_id": "PT_1", "service_date": date(2025, 3, 10),
+                                      "claim_amount": 250.0, "cpt_codes": ["99213"], "icd10_codes": ["E11.9"]})
+        state = self.run_claim(claim=claim(service="2025-03-10", amount=250.0), id=id_card())
+        self.assertTrue(state["duplicate"]["is_duplicate"], state["duplicate"]["summary"])
+        self.assertEqual(state["duplicate"]["duplicate_of"], "claim-0")
+        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertIn("duplicate of claim claim-0", state["decision"]["justification"])
+        for agent in ("kyc", "claims", "policy", "fraud"):              # skipped: no model calls
+            self.assertNotIn(agent, state, f"{agent} ran on a duplicate")
+        self.assertEqual(self.graph.get_state(run_config("t1")).next, ("human_review",))
+
+    def test_same_patient_new_visit_is_not_a_duplicate(self):
+        self.repo.claims_rows.append({"case_id": "claim-0", "member_id": "PT_1", "service_date": date(2025, 3, 10),
+                                      "claim_amount": 250.0, "cpt_codes": ["99213"], "icd10_codes": ["E11.9"]})
+        for service, amount in (("2025-04-02", 250.0), ("2025-03-10", 310.0)):
+            state = self.run_claim(thread=f"t-{service}-{amount}", claim=claim(service=service, amount=amount), id=id_card())
+            self.assertFalse(state["duplicate"]["is_duplicate"])
+            self.assertEqual(self.decision(state), "APPROVE", state["decision"]["justification"])
+
+    def test_duplicate_review_can_be_turned_off(self):
+        self.repo.claims_rows.append({"case_id": "claim-0", "member_id": "PT_1", "service_date": date(2025, 3, 10),
+                                      "claim_amount": 250.0, "cpt_codes": ["99213"], "icd10_codes": ["E11.9"]})
+        with mock.patch.object(config, "RULES", {**config.RULES, "duplicate_review": False}):
+            state = self.run_claim(claim=claim(service="2025-03-10", amount=250.0), id=id_card())
+        self.assertIn("duplicate_claim", state["fraud"]["tags"])      # still a fraud signal
+
     def test_amount_just_under_review_limit_escalates(self):
         self.assertIn("amount_under_10k", self.run_claim(claim=claim(amount=9875.0), id=id_card())["fraud"]["tags"])
 
@@ -495,6 +522,13 @@ class VisionContractTests(unittest.TestCase):
                                "CLAIM_FORM", config.RULES)["fields"]
         self.assertEqual((out["claim_amount"], out["service_date"], out["cpt_codes"]), (9875.0, "2025-03-10", ["99213", "17000"]))
         self.assertIsNone(out["physician_signature"])
+
+    def test_group_number_is_never_the_policy_number(self):
+        ub04 = "58 INSURED'S NAME John Johnson X.\n60 INSURED UNIQUE ID MED-GLD-1954280\n57 GROUP NUMBER GRP-76562"
+        self.assertEqual(policy_number("GRP-76562", ub04, config.RULES), "MED-GLD-1954280")
+        self.assertEqual(policy_number("MED-GLD-1954280", ub04, config.RULES), "MED-GLD-1954280")
+        self.assertIsNone(policy_number("GRP-76562", "57 GROUP NUMBER GRP-76562", config.RULES))
+        self.assertIsNone(policy_number("GRP-1", "MED-GLD-1 and MED-GLD-2", config.RULES))   # two: not guessed
 
 
 if __name__ == "__main__":

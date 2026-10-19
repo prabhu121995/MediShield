@@ -112,6 +112,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.json().catch(() => ({}));
     throw new RequestError(res.status, body.detail ?? `request failed (${res.status})`);
   }
+  if (res.status === 204) return undefined as T;     // a delete: no body
   return res.json() as Promise<T>;
 }
 
@@ -156,6 +157,11 @@ export function createPatient(body: PatientInput) {
 
 export function updatePatient(id: string, body: PatientInput) {
   return call<Patient>(`/patients/${id}`, jsonInit("PUT", body));
+}
+
+// Admin only. Refused (409) while claims or pages are linked to the patient.
+export function deletePatient(id: string) {
+  return call<void>(`/patients/${id}`, { method: "DELETE" });
 }
 
 function jsonInit(method: string, body: unknown): RequestInit {
@@ -267,6 +273,8 @@ export interface ClaimResult {
   claims?: { summary: string; confidence: number; error?: string;
     policy_brief?: { cpt_codes: string[]; icd10_codes: string[]; claim_amount?: number | null; service_date?: string | null; medications: string[] };
     claim?: { file_name: string; extracted_fields: Record<string, unknown> } | null };
+  duplicate?: { is_duplicate: boolean; duplicate_of?: string | null; member_id?: string | null; service_date?: string | null;
+    claim_amount?: number | null; checked: number; summary: string; error?: string };
   policy?: { covered: boolean; exclusions: string[]; policy_clause: string; plan: string; sources: string[]; notes: string[];
     cpt_codes_checked: string[]; confidence: number; error?: string };
   fraud?: { fraud_score: number; risk_level: string; tags: string[]; anomalies: FraudAnomaly[]; confidence: number; summary: string; error?: string };
@@ -320,6 +328,9 @@ export interface ClaimBundle {
   override?: ClaimOverride | null;
   documents: CaseSummary[];
   summary: BundleSummary;
+  // Lists only: why the claim is where it is (on hold, else the agents' decision reasons).
+  reasons?: string[];
+  justification?: string | null;
 }
 
 export interface QueueItem extends ClaimBundle {
@@ -356,6 +367,16 @@ export function replaceDocument(id: string, docId: string, file: File) {
   const form = new FormData();
   form.append("file", file);
   return call<ClaimBundle>(`/claim-bundles/${id}/documents/${docId}/replace`, { method: "POST", body: form });
+}
+
+// Admin only: delete a claim that is not running, with its pages. The audit log keeps it.
+export function deleteClaim(id: string) {
+  return call<void>(`/claim-bundles/${id}`, { method: "DELETE" });
+}
+
+// Admin only: delete one page of the claim, then the claim re-runs on the pages left.
+export function deleteDocument(id: string, docId: string) {
+  return call<ClaimBundle>(`/claim-bundles/${id}/documents/${docId}`, { method: "DELETE" });
 }
 
 // Re-upload every page of the claim, then it re-runs.

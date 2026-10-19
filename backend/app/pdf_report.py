@@ -44,6 +44,8 @@ class Report:
         return self.pdf.w - self.pdf.l_margin - self.pdf.r_margin
 
     def heading(self, text: str) -> None:
+        if self.pdf.get_y() > self.pdf.h - self.pdf.b_margin - 25:     # keep a heading with what follows it
+            self.pdf.add_page()
         self.pdf.set_font("Helvetica", "B", 11)
         self.pdf.set_text_color(*INK)
         self.pdf.cell(0, 7, latin(text), new_x="LMARGIN", new_y="NEXT")
@@ -109,6 +111,53 @@ class Report:
             p.set_text_color(*INK)
             p.cell(self.width / max(4, len(series)) - 4, 5, latin(f"{label}  {totals.get(key, 0):,}"))
         p.ln(9)
+
+    def timeline(self, title: str, rows: list[tuple[str, int, int, str, str]], span_ms: int) -> None:
+        """A Gantt of steps in order: rows are (label, start offset ms, duration ms, hex, duration text),
+        one bar per row on a shared time axis from 0 to span_ms. Zero-length steps get a tick."""
+        p = self.pdf
+        self.heading(title)
+        label_w, row_h = 62.0, 4.6
+        x0, w = p.l_margin + label_w, self.width - label_w - 14
+        span = max(span_ms, 1)
+
+        def axis(y: float) -> None:
+            p.set_font("Helvetica", "", 6)
+            p.set_text_color(*MUTED)
+            p.set_draw_color(*GRID)
+            for frac in (0, 0.25, 0.5, 0.75, 1):
+                p.line(x0 + frac * w, y, x0 + frac * w, y + 1.5)
+                p.set_xy(x0 + frac * w - 8, y + 1.5)
+                ms = span * frac
+                p.cell(16, 3, latin(f"{ms / 1000:.1f} s" if span >= 1000 else f"{ms:.0f} ms"), align="C")
+            p.set_y(y + 5)
+
+        axis(p.get_y())
+        for label, start, dur, color, took in rows:
+            if p.get_y() + row_h > p.h - p.b_margin:
+                p.add_page()
+                axis(p.get_y())
+            y = p.get_y()
+            p.set_draw_color(*GRID)
+            p.line(x0, y + row_h, x0 + w, y + row_h)
+            p.set_font("Helvetica", "", 7)
+            p.set_text_color(*INK)
+            text = latin(label)
+            while p.get_string_width(text) > label_w - 2 and len(text) > 3:
+                text = text[:-4] + "..."
+            p.set_xy(p.l_margin, y)
+            p.cell(label_w - 2, row_h, text)
+            bx = x0 + min(start, span) / span * w
+            bw = max(dur / span * w, 0.6)
+            p.set_fill_color(*rgb(color))
+            p.rect(bx, y + 0.9, min(bw, x0 + w - bx + 0.6), row_h - 1.8, style="F")
+            if took:
+                p.set_font("Helvetica", "", 6)
+                p.set_text_color(*MUTED)
+                p.set_xy(min(bx + bw + 0.8, x0 + w + 1), y)
+                p.cell(14, row_h, latin(took))
+            p.set_y(y + row_h)
+        p.ln(5)
 
     def table(self, title: str, headers: list[str], fractions: list[float], rows: list[list]) -> None:
         p = self.pdf

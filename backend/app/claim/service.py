@@ -10,6 +10,10 @@ Status of a claim (claim_bundle.status):
                                                   (checked for every page before any is read), a page
                                                   could not be read, or an agent failed: a person
                                                   continues, stops or re-uploads
+    PROCESSING -> NEEDS_REVIEW                    a duplicate: the patient already has a stored claim with
+                                                  the same date of service and amount (app.claim.duplicate);
+                                                  the agents are skipped, it is escalated to a person and not
+                                                  stored again for later checks
     QUEUED | PROCESSING | ON_HOLD | NEEDS_REVIEW -> STOPPED
                                                   a person stopped it. A running claim stops at once:
                                                   the model call in flight is abandoned and no further
@@ -30,6 +34,7 @@ processing at a time: new uploads, re-runs and re-uploads are refused until it f
 from __future__ import annotations
 
 import logging
+import pathlib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -48,7 +53,7 @@ log = logging.getLogger("medishield.claims")
 _executor = ThreadPoolExecutor(max_workers=config.PIPELINE_WORKERS, thread_name_prefix="claim")
 
 STATUS_BY_DECISION = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "ESCALATE": "NEEDS_REVIEW"}
-RESULT_KEYS = ("plan", "kyc", "claims", "policy", "fraud", "decision", "trace", "hold")
+RESULT_KEYS = ("plan", "kyc", "claims", "duplicate", "policy", "fraud", "decision", "trace", "hold")
 RUNNING = ("QUEUED", "PROCESSING")
 
 # Claims a person stopped while their run was queued or in flight. The run checks this before
@@ -150,6 +155,7 @@ def link_patient(claim_id: str, docs: list[dict], kyc_member: dict | None = None
         return None
     patient_id = intake.register_patient(member["member_id"], bundle.get("created_by") or "system")
     if patient_id and db.link_bundle_patient(claim_id, patient_id):
+        db.add_case_patient(claim_id, member["member_id"])
         audit.record(claim_id, "orchestrator", "patient_linked",
                      detail={"member_id": member["member_id"], "full_name": member.get("full_name"),
                              "patient_id": patient_id, "found_by": found_by})
@@ -221,8 +227,15 @@ def _finish(claim_id: str, thread_id: str, state: dict) -> None:
                          result={**result_of(state), "thread_id": thread_id, "awaiting_human": False})
         audit.record(claim_id, "orchestrator", "claim_stopped", detail={"note": "stopped at the hold"})
         return
+    dup = state.get("duplicate") or {}
+    if dup.get("is_duplicate"):                    # a repeat of a stored claim: decide escalates it to a person
+        audit.record(claim_id, "orchestrator", "claim_duplicate",
+                     detail={"duplicate_of": dup.get("duplicate_of"), "member_id": dup.get("member_id"),
+                             "service_date": dup.get("service_date"), "claim_amount": dup.get("claim_amount"),
+                             "note": dup.get("summary")})
     try:
-        _persist_history(claim_id, state)
+        if not dup.get("is_duplicate"):            # the original is already stored; a repeat adds nothing
+            _persist_history(claim_id, state)
     except Exception as exc:                       # history feeds later fraud checks; it must not fail this claim
         log.exception("claim %s: history not stored", claim_id)
         audit.record(claim_id, "orchestrator", "history_not_stored", status="error",
@@ -443,6 +456,55 @@ def replace_all_documents(claim_id: str, pages: list[tuple[str, str]], user: str
                       "patient_id": bundle.get("patient_id"), "created_by": user})
     audit.record(claim_id, user, "documents_replaced",
                  detail={"from": old, "files": [n for _, n in pages], "documents": len(pages)})
+    rerun_claim(claim_id, user)
+
+
+def _remove_upload(path: str | None) -> None:
+    """Delete an uploaded page file; only files inside the upload folder are touched."""
+    if not path:
+        return
+    file = pathlib.Path(path).resolve()
+    if file.is_relative_to(config.UPLOAD_DIR.resolve()):
+        file.unlink(missing_ok=True)
+
+
+def delete_claim(claim_id: str, user: str) -> None:
+    """Delete a claim that is not running: its pages, uploaded files, stored history and
+    checkpoints. The audit log keeps its history, plus who deleted it."""
+    bundle = db.get_bundle(claim_id, with_result=False)
+    if bundle is None:
+        raise KeyError(claim_id)
+    if bundle.get("status") in RUNNING or claim_id in _running:
+        raise ValueError("the claim is still being processed: stop it first")
+    docs = db.bundle_documents(claim_id)
+    saver = getattr(get_claim_graph(), "checkpointer", None)
+    threads = set(db.checkpoint_threads(claim_id)) | {t for t in getattr(saver, "storage", {}) if t.startswith(f"{claim_id}:")}
+    db.delete_bundle(claim_id)
+    for thread_id in threads:                       # forget the in-memory copy too
+        if hasattr(saver, "delete_thread"):
+            saver.delete_thread(thread_id)
+    for d in docs:
+        _remove_upload((d.get("result") or {}).get("file_path"))
+    audit.record(claim_id, user, "claim_deleted",
+                 detail={"title": bundle["title"], "patient_id": bundle.get("patient_id"),
+                         "status": bundle.get("status"), "decision": bundle.get("decision"),
+                         "files": [d["file_name"] for d in docs]})
+
+
+def delete_document(claim_id: str, doc_id: str, user: str) -> None:
+    """Delete one page of a claim, then re-run the claim on the pages left. The last page
+    cannot be deleted: delete the claim instead."""
+    ensure_idle(claim_id)
+    docs = db.bundle_documents(claim_id)
+    row = next((r for r in docs if r["case_id"] == doc_id), None)
+    if row is None:
+        raise KeyError(doc_id)
+    if len(docs) == 1:
+        raise ValueError("this is the claim's only page: delete the claim instead")
+    db.delete_case(doc_id)
+    _remove_upload((row.get("result") or {}).get("file_path"))
+    audit.record(claim_id, user, "document_deleted", doc_id=doc_id,
+                 detail={"file_name": row["file_name"], "doc_type": row.get("doc_type")})
     rerun_claim(claim_id, user)
 
 

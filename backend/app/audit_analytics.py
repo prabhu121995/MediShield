@@ -34,7 +34,11 @@ def _where(since: datetime | None, entity_type: str | None, actor: str | None,
     if since:
         clauses.append("created_at >= %s")
         args.append(since)
-    for col, value in (("entity_type", entity_type), ("actor", actor), ("event", event), ("entity_id", entity_id)):
+    if entity_id:                                   # one case: its claim events and its documents'
+        clause, scope_args = db.audit_case_scope(entity_id)
+        clauses.append(clause)
+        args.extend(scope_args)
+    for col, value in (("entity_type", entity_type), ("actor", actor), ("event", event)):
         if value:
             clauses.append(f"{col} = %s")
             args.append(value)
@@ -96,6 +100,7 @@ def investigations(where: str, args: list, limit: int) -> list[dict]:
     marks = ", ".join(["%s"] * len(ids))
     titles = {b["bundle_id"]: b["title"]
               for b in db._fetch(f"SELECT bundle_id, title FROM claim_bundle WHERE bundle_id IN ({marks})", tuple(ids))}
+    titles.update(deleted_titles([i for i in ids if i not in titles]))
     agent_dec, human_dec, summary = {}, {}, {}
     for r in db._fetch("SELECT entity_id, actor, event, detail FROM audit_event WHERE entity_type = 'claim' "
                        f"AND entity_id IN ({marks}) AND (event IN ('claim_decided', 'human_override', "
@@ -219,6 +224,16 @@ def _write_csv(rows: list[dict]) -> str:
 
 # ---- one claim: its whole investigation --------------------------------------------------
 
+def deleted_titles(ids: list[str]) -> dict[str, str]:
+    """The titles of deleted claims, as recorded on their claim_deleted event."""
+    if not ids:
+        return {}
+    marks = ", ".join(["%s"] * len(ids))
+    rows = db._fetch("SELECT entity_id, JSON_UNQUOTE(JSON_EXTRACT(detail, '$.title')) AS title FROM audit_event "
+                     f"WHERE entity_type = 'claim' AND event = 'claim_deleted' AND entity_id IN ({marks})", tuple(ids))
+    return {r["entity_id"]: r["title"] for r in rows if r["title"] and r["title"] != "null"}
+
+
 def audit_claims(limit: int) -> list[dict]:
     """Every claim the audit log knows, newest activity first, for the Audit log's claim picker.
     Read from the audit trail, so a claim deleted since can still be picked."""
@@ -229,100 +244,16 @@ def audit_claims(limit: int) -> list[dict]:
     marks = ", ".join(["%s"] * len(rows))
     known = {b["bundle_id"]: b for b in db._fetch(f"SELECT bundle_id, title, status FROM claim_bundle "
                                                    f"WHERE bundle_id IN ({marks})", tuple(r["entity_id"] for r in rows))}
-    return [{"claim_id": r["entity_id"], "title": known.get(r["entity_id"], {}).get("title"),
+    gone = deleted_titles([r["entity_id"] for r in rows if r["entity_id"] not in known])
+    return [{"claim_id": r["entity_id"], "title": known.get(r["entity_id"], {}).get("title") or gone.get(r["entity_id"]),
              "status": known.get(r["entity_id"], {}).get("status") or "DELETED",
              "last_at": _iso(r["last_at"]), "events": int(r["events"])} for r in rows]
 
 
-def _claim_events(claim_id: str) -> list[dict]:
-    """Every audit row of one claim, oldest first (all runs, including re-runs)."""
-    return db._fetch(f"SELECT {', '.join(DB_COLUMNS)} FROM audit_event WHERE entity_type = 'claim' "
-                     "AND entity_id = %s ORDER BY id", (claim_id,))
-
-
-def claim_csv(claim_id: str) -> str:
-    """The raw audit trail of one claim, oldest first, in the same columns as the full export."""
-    return _write_csv(_claim_events(claim_id))
-
-
-def _ts(dt: datetime | None) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if dt else "-"
-
-
-def _event_text(d: dict) -> str:
-    """One readable line for any claim event (agent runs carry their own note)."""
-    if d.get("note"):
-        return str(d["note"])
-    for key in ("justification", "error", "decision", "action", "file_name"):
-        if d.get(key):
-            return f"{key}: {d[key]}"
-    if isinstance(d.get("files"), list):
-        return "files: " + ", ".join(map(str, d["files"]))
-    return json.dumps(d, ensure_ascii=False, default=str)[:300] if d else ""
-
-
-def _run_head(i: int, x: dict) -> str:
-    d = _detail(x["detail"])
-    return (f"{i}. {x['actor']}" + (f" on {d['file_name']}" if d.get("file_name") else "")
-            + f"  ·  started {_ts(started_at(x['created_at'], x['duration_ms']))}  ·  finished {_ts(x['created_at'])}"
-            + f"  ·  took {_ms(int(x['duration_ms'] or 0))}" + ("  ·  FAILED" if x["status"] == "error" else ""))
-
-
-def claim_report_pdf(claim_id: str) -> bytes | None:
-    """Everything that happened to one claim: which agent ran, on what, when it started and
-    finished, how long it took and what it returned; plus every human action. None if no claim."""
-    from app.pdf_report import Report
-
-    claim = db.get_bundle(claim_id)
-    rows = _claim_events(claim_id)
-    if claim is None and not rows:
-        return None
-    if claim is None:                       # deleted since: the audit trail outlives it, so report from that alone
-        claim = {"title": f"{claim_id[:8]} (claim no longer exists)", "status": "deleted", "created_by": rows[0]["actor"]}
-    runs = [r for r in rows if r["event"] == "agent_completed"]
-    patient = db.get_patient(claim["patient_id"]) if claim.get("patient_id") else None
-    docs = db.bundle_documents(claim_id)
-    decision = (claim.get("result") or {}).get("decision") or {}
-    override = claim.get("override") or {}
-    agent_ms = sum(int(r["duration_ms"] or 0) for r in runs)
-    wall_ms = int((rows[-1]["created_at"] - rows[0]["created_at"]).total_seconds() * 1000) if rows else 0
-
-    r = Report(f"MediShield - Claim investigation: {claim['title']}",
-               f"Claim {claim_id}   Patient: {patient['full_name'] if patient else 'none'}   "
-               f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')} UTC")
-    r.tiles([("Status", str(claim.get("status") or "-").replace("_", " ").lower()),
-             ("Agents decided", str(decision.get("decision") or claim.get("decision") or "-")),
-             ("Reviewer decided", str(override.get("decision") or "-")),
-             ("Agent steps", str(len(runs))), ("Agent time", _ms(agent_ms)), ("Start to end", _ms(wall_ms))])
-    claim_lines = [
-        # From the audit trail (UTC), like every other time here; claim_bundle.created_at is server-local time.
-        ("Submitted", f"by {claim.get('created_by')} on {_ts(rows[0]['created_at']) if rows else '-'} UTC"),
-        (f"Documents ({len(docs)})", "; ".join(f"{d['file_name']} ({str(d.get('doc_type') or 'unclassified').lower()}, "
-                                               f"{str(d.get('status') or '').lower()})" for d in docs) or "none"),
-        ("Orchestrator", f"{decision.get('decision', '-')} at "
-                         + (f"{float(decision['confidence']):.0%}" if decision.get("confidence") is not None else "-")
-                         + " confidence; reasons: "
-                         + ("; ".join(decision.get("reasons") or []) or "none")),
-    ]
-    if override:
-        claim_lines.append(("Reviewer", f"{override.get('decision')} by {override.get('reviewer')}: {override.get('note')}"))
-    r.entries("The claim", claim_lines)
-    r.table(f"Agent runs, in order ({len(runs)})", ["#", "Agent", "Worked on", "Started", "Finished", "Took", "Status"],
-            [0.05, 0.13, 0.24, 0.19, 0.19, 0.1, 0.1],
-            [[i, x["actor"], _detail(x["detail"]).get("file_name") or "claim",
-              _ts(started_at(x["created_at"], x["duration_ms"]))[11:], _ts(x["created_at"])[11:],
-              _ms(int(x["duration_ms"] or 0)), x["status"]] for i, x in enumerate(runs, 1)])
-    r.entries("What each agent returned",
-              [(_run_head(i, x), str(_detail(x["detail"]).get("note") or "")) for i, x in enumerate(runs, 1)])
-    r.entries(f"Every event ({len(rows)})",
-              [(f"{_ts(x['created_at'])}  ·  {x['actor']}  ·  {x['event'].replace('_', ' ')}"
-                + (f"  ·  took {_ms(int(x['duration_ms']))}" if x["duration_ms"] is not None else "")
-                + ("  ·  ERROR" if x["status"] == "error" else ""),
-                _event_text(_detail(x["detail"]))) for x in rows if x["event"] != "agent_started"])
-    r.note("Source: MySQL table audit_event. Times are UTC. A step's start is its finish time minus its duration. "
-           "'Agent time' adds up every agent step; 'Start to end' runs from the first event to the last, "
-           "including waits for people. The raw CSV has every field of every event.")
-    return r.output()
+def case_title(case_id: str) -> str:
+    """The case's title (C001_PT_20745), or its short ID once the case is deleted."""
+    rows = db._fetch("SELECT title FROM claim_bundle WHERE bundle_id = %s", (case_id,))
+    return (rows[0]["title"] if rows else None) or deleted_titles([case_id]).get(case_id) or case_id[:8]
 
 
 # ---- PDF report of the analysis ---------------------------------------------------------
@@ -338,11 +269,14 @@ def report_pdf(range_key: str, entity_type: str | None, actor: str | None, event
     # Every claim investigated in the range (bounded by the stats scan), not just the top few.
     s = stats(range_key, entity_type, actor, event, claims_limit=config.LOG_STATS_SCAN_MAX, entity_id=entity_id)
     t = s["totals"]
-    r = Report("MediShield - Audit log analysis",
-               f"Range: {range_key}   Entity: {entity_type or 'all'}   Actor: {actor or 'all'}   "
-               + (f"Event: {event}   " if event else "") + (f"Claim: {entity_id}   " if entity_id else "")
-               + f"Generated: {s['generated_at']} UTC")
-    r.tiles([("Events", f"{t['events']:,}"), ("Claims touched", f"{t['claims']:,}"),
+    title = case_title(entity_id) if entity_id else None
+    r = Report(f"MediShield - Audit log analysis{f' - case {title}' if title else ''}",
+               (f"Case: {title} ({entity_id})   " if entity_id else "")
+               + f"Range: {range_key}   Entity: {entity_type or 'all'}   Actor: {actor or 'all'}   "
+               + (f"Event: {event}   " if event else "") + f"Generated: {s['generated_at']} UTC")
+    r.tiles([("Events", f"{t['events']:,}"),
+             ("Agent steps", f"{sum(a['runs'] for a in s['agents']):,}") if entity_id
+             else ("Claims touched", f"{t['claims']:,}"),
              ("People", f"{t['people']:,}"), ("Human actions", f"{t['human_events']:,}"),
              ("Human decisions", f"{t['human_decisions']:,}"), ("Errors", f"{t['errors']:,}")])
     r.stacked_columns(f"Audit events per {s['bucket']}, by entity", s["volume"],

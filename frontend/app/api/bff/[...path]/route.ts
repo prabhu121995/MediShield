@@ -31,7 +31,8 @@ async function proxy(req: NextRequest, { params }: Ctx) {
   const out = new Headers({ "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
   const disposition = upstream.headers.get("content-disposition");
   if (disposition) out.set("Content-Disposition", disposition);
-  return new NextResponse(upstream.body, { status: upstream.status, headers: out });
+  // 204 (a delete) has no body; NextResponse refuses one.
+  return new NextResponse(upstream.status === 204 ? null : upstream.body, { status: upstream.status, headers: out });
 }
 
-export { proxy as GET, proxy as POST };
+export { proxy as GET, proxy as POST, proxy as PUT, proxy as DELETE };

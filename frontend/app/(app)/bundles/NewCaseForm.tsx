@@ -169,7 +169,7 @@ export default function NewCaseForm({ patients, locked = false, requirements }: 
         <div>
           <label htmlFor="case_title" className="label">Claim title <span className="font-normal text-slate-400">(optional)</span></label>
           <input id="case_title" className="input" value={title} onChange={(e) => setTitle(e.target.value)}
-            placeholder="Jane Doe · March claim" maxLength={160} disabled={busy} />
+            placeholder="Blank: case number + patient ID, e.g. C002_PT_20745" maxLength={160} disabled={busy} />
         </div>
         <div>
           <label htmlFor="case_patient" className="label">Patient <span className="font-normal text-slate-400">(optional, read from file names)</span></label>

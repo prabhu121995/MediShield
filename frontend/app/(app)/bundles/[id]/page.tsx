@@ -8,10 +8,10 @@ import Badge from "@/components/Badge";
 import ClaimDownloads from "@/components/ClaimDownloads";
 import WorkflowGraph, { EdgeKind, GraphEdge, GraphNode } from "@/components/WorkflowGraph";
 import { AgentSummary, AuditEvent, ClaimBundle, ClaimResult, Patient } from "@/lib/api";
-import { claimProgress, fmtMs, PageProgress, Progress, Stage, StageState } from "@/lib/progress";
-import { ApiError, serverApi } from "@/lib/server-api";
+import { claimProgress, fmtMs, PAGE_STEPS, PageProgress, Progress, Stage, StageState } from "@/lib/progress";
+import { ApiError, currentUser, serverApi } from "@/lib/server-api";
 import { LONG_STEP_S } from "@/lib/settings";
-import { HoldPanel, ReplacePageButton, ResumeButton, StopButton } from "./ClaimControls";
+import { DeleteClaimButton, DeletePageButton, HoldPanel, ReplacePageButton, ResumeButton, StopButton } from "./ClaimControls";
 import ClaimReview from "./ClaimReview";
 
 export const dynamic = "force-dynamic";
@@ -53,7 +53,7 @@ const CARD_TONE: Record<string, { bar: string; tile: string }> = {
 
 const AGENTS: { key: string; title: string; role: string }[] = [
   { key: "classify", title: "Classifier agent", role: "Every page first: vision model document type (or UNKNOWN), image quality, blur score" },
-  { key: "extract", title: "Preprocess + extract agent", role: "Vision model: image → text; text model: that type's fields" },
+  { key: "extract", title: "Preprocess + extract agent", role: "Preprocess: vision model, image → text · Extract: text model, that type's fields" },
   { key: "kyc", title: "KYC agent", role: "Name in the member database; insurance card valid (else human review)" },
   { key: "claims", title: "Claims agent", role: "Extracts the claim details and briefs the policy agent" },
   { key: "policy", title: "Policy agent", role: "Covered or not: claim brief + retrieved clauses + LLM (RAG)" },
@@ -114,7 +114,7 @@ function Stepper({ progress }: { progress: Progress }) {
               ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
               : <span aria-hidden>{s.state === "done" ? "✓" : s.state === "error" ? "✕" : s.state === "hold" ? "⏸" : s.state === "skipped" ? "–" : "○"}</span>}
             {s.label}
-            {["classify", "extract"].includes(s.key) && s.state !== "waiting" && s.state !== "running" && <span className="font-normal opacity-75">{s.note}</span>}
+            {PAGE_STEPS.includes(s.key as never) && s.state !== "waiting" && s.state !== "running" && <span className="font-normal opacity-75">{s.note}</span>}
             {s.state === "running" && s.startedAt && <span className="font-normal tabular-nums opacity-75">{isLong(s) ? "in progress " : ""}{elapsed(s.startedAt)}</span>}
           </span>
         </li>
@@ -147,7 +147,7 @@ function AgentCard({ title, role, stage, summary, confidence, perPage, children 
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
-            <span className="truncate text-sm font-semibold text-slate-900">{title}</span>
+            <span className="min-w-0 break-words text-sm font-semibold leading-tight text-slate-900">{title}</span>
             {perPage && <span className="shrink-0 rounded bg-slate-100 px-1 text-[10px] font-medium text-slate-500" title="Runs once for each page">↻ page</span>}
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
@@ -190,7 +190,12 @@ function AgentCard({ title, role, stage, summary, confidence, perPage, children 
 function pageLine(step: string, p: PageProgress): string {
   const st = p.steps[step] ?? { state: "waiting" as const };
   const d = st.detail ?? {};
-  if (st.state === "running") return `running · ${elapsed(st.startedAt)}`;
+  if (st.state === "running") {
+    if (step !== "extract") return `running · ${elapsed(st.startedAt)}`;
+    const pre = p.steps.preprocess;
+    return pre?.state === "running" ? `preprocess: image → text · ${elapsed(pre.startedAt)}`
+      : `extract: fields · ${elapsed(st.startedAt)}`;
+  }
   if (st.state === "waiting") return "queued";
   if (d.skipped) return "skipped (earlier step failed)";
   if (d.error) return `failed: ${String(d.error).slice(0, 80)}`;
@@ -234,7 +239,11 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
     if (key === "fraud") return `score ${d.fraud_score ?? 0}${(d.tags as string[] | undefined)?.length ? `: ${(d.tags as string[]).join(", ")}` : ""}`;
     return "";
   };
-  const agent = (key: string) => AGENTS.find((a) => a.key === key)!;
+  // title and role only: a spread `key` prop is a React error
+  const agent = (key: string) => {
+    const { title, role } = AGENTS.find((a) => a.key === key)!;
+    return { title, role };
+  };
   const props = (key: string) => ({
     ...agent(key), stage: st[key],
     summary: full ? s[key]?.summary : liveSummary(key),
@@ -323,6 +332,9 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
   const started: StageState = st.classify.state === "waiting" && !progress.running ? "waiting" : "done";
   const ended: StageState = human.state === "done" || (st.decide.state === "done" && human.state === "skipped") ? "done" : "waiting";
   const decision = (st.decide.detail?.decision as string | undefined) ?? result.decision?.decision;
+  const dup = st.duplicate_check;
+  const isDuplicate = dup.detail?.is_duplicate === true || result.duplicate?.is_duplicate === true;
+  const dupOf = (dup.detail?.duplicate_of as string | undefined) ?? result.duplicate?.duplicate_of ?? undefined;
 
   const edges: GraphEdge[] = [
     { from: "start", to: "classify", kind: edgeKind(started, st.classify.state) },
@@ -336,8 +348,11 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
       kind: holdAfterExtract ? edgeKind(st.extract.state, hold.state) : "unused" },
     { from: "hold", to: "plan", conditional: true, kind: holdAfterExtract ? edgeKind(hold.state, st.plan.state) : "unused" },
     { from: "extract", to: "plan", kind: holdAfterExtract ? "unused" : edgeKind(st.extract.state, st.plan.state) },
-    { from: "plan", to: "kyc", conditional: true, kind: edgeKind(st.plan.state, st.kyc.state) },
-    { from: "plan", to: "claims", conditional: true, kind: edgeKind(st.plan.state, st.claims.state) },
+    { from: "plan", to: "duplicate", kind: edgeKind(st.plan.state, dup.state) },
+    { from: "duplicate", to: "kyc", conditional: true, kind: edgeKind(dup.state, st.kyc.state) },
+    { from: "duplicate", to: "claims", conditional: true, kind: edgeKind(dup.state, st.claims.state) },
+    { from: "duplicate", to: "decide", conditional: true, label: "duplicate",
+      kind: isDuplicate ? edgeKind(dup.state, st.decide.state) : "unused" },
     { from: "claims", to: "policy", conditional: true, label: "claim form", kind: edgeKind(st.claims.state, st.policy.state) },
     { from: "claims", to: "fraud", conditional: true, label: "no claim form",
       kind: st.policy.state === "skipped" ? edgeKind(st.claims.state, st.fraud.state) : "unused" },
@@ -350,30 +365,33 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
   ];
 
   const nodes: GraphNode[] = [
-    { id: "start", col: "1", row: 2, content: <Terminal label="START" state={started} /> },
-    { id: "classify", col: "2", row: 2, fill: true, content: pageCard("classify") },
-    { id: "hold", col: "2 / span 2", row: 1, content: <FlowNode stage={hold} title="Ingest hold" sub="a person: continue, stop or re-upload" human wide /> },
-    { id: "extract", col: "3", row: 2, fill: true, content: pageCard("extract") },
-    { id: "plan", col: "4", row: 2, content: (
+    { id: "start", col: "1", row: 2, step: 0, content: <Terminal label="START" state={started} /> },
+    { id: "classify", col: "2", row: 2, step: 1, fill: true, content: pageCard("classify") },
+    { id: "hold", col: "2 / span 2", row: 1, step: holdAfterExtract ? 4 : 2, content: <FlowNode stage={hold} title="Ingest hold" sub="a person: continue, stop or re-upload" human wide /> },
+    { id: "extract", col: "3", row: 2, step: 3, fill: true, content: pageCard("extract") },
+    { id: "plan", col: "4", row: 2, step: 5, content: (
       <FlowNode stage={st.plan} title="Plan" compact
         sub={st.plan.state === "done" ? (((st.plan.detail?.agents as string[]) ?? []).join(", ") || "no agents") : undefined} />
     ) },
-    { id: "kyc", col: "5", row: 1, fill: true, content: kycCard },
-    { id: "claims", col: "5", row: 2, fill: true, content: claimsCard },
-    { id: "policy", col: "5", row: 3, fill: true, content: policyCard },
-    { id: "fraud", col: "6", row: 2, fill: true, content: fraudCard },
-    { id: "decide", col: "7", row: 2, content: (
+    { id: "duplicate", col: "5", row: 2, step: 6, content: (
+      <FlowNode stage={dup} title="Duplicate check" sub={isDuplicate ? `duplicate of ${dupOf?.slice(0, 8) ?? "a stored claim"} · agents skipped` : dup.state === "done" ? "no earlier claim with this DOS + amount" : "checkpoint · no model call"} />
+    ) },
+    { id: "kyc", col: "6", row: 1, step: 7, fill: true, content: kycCard },
+    { id: "claims", col: "6", row: 2, step: 7, fill: true, content: claimsCard },
+    { id: "policy", col: "6", row: 3, step: 8, fill: true, content: policyCard },
+    { id: "fraud", col: "7", row: 2, step: 9, fill: true, content: fraudCard },
+    { id: "decide", col: "8", row: 2, step: 10, content: (
       <FlowNode stage={st.decide} title="Orchestrator" sub="decides the claim">
         {decision && st.decide.state === "done" && <span className="mt-1 block"><Badge value={decision} /></span>}
       </FlowNode>
     ) },
-    { id: "human", col: "7", row: 3, content: <FlowNode stage={human} title="Human review" sub={human.note} human /> },
-    { id: "end", col: "8", row: 2, content: <Terminal label="END" state={ended} /> },
+    { id: "human", col: "8", row: 3, step: 11, content: <FlowNode stage={human} title="Human review" sub={human.note} human /> },
+    { id: "end", col: "9", row: 2, step: 12, content: <Terminal label="END" state={ended} /> },
   ];
 
   return (
     <WorkflowGraph nodes={nodes} edges={edges} label="Claim agent workflow" title="Agent workflow"
-      minWidth={1190} columns="48px minmax(180px,1fr) minmax(180px,1fr) 60px minmax(180px,1fr) minmax(180px,1fr) 116px 48px" />
+      minWidth={1330} columns="48px minmax(180px,1fr) minmax(180px,1fr) 60px 116px minmax(180px,1fr) minmax(180px,1fr) 116px 48px" />
   );
 }
 
@@ -426,7 +444,7 @@ function FlowNode({ stage, title, sub, human, compact, wide, children }: {
   );
 }
 
-const AGENT_ACTORS = ["preprocess", "classify", "extract", "ingest_hold", "plan", "kyc", "claims", "policy", "fraud",
+const AGENT_ACTORS = ["preprocess", "classify", "extract", "ingest_hold", "plan", "kyc", "claims", "duplicate_check", "policy", "fraud",
   "decide", "human_review", "orchestrator", "system"];
 
 function auditText(e: AuditEvent): string {
@@ -479,7 +497,7 @@ function AuditLog({ events, claimId, q, page }: { events: AuditEvent[]; claimId:
           const returned = Object.fromEntries(Object.entries(d).filter(([k]) => k !== "note"));
           const long = (e.duration_ms ?? 0) >= LONG_STEP_S * 1000;
           return (
-            <li key={e.id} className={`grid grid-cols-[88px_130px_1fr] gap-3 border-l-2 py-1.5 pl-3 text-xs sm:grid-cols-[96px_170px_1fr] ${
+            <li key={e.id} className={`grid grid-cols-[76px_1fr] gap-x-3 gap-y-0.5 border-l-2 py-1.5 pl-3 text-xs sm:grid-cols-[96px_170px_1fr] ${
               e.status === "error" ? "border-rose-300" : e.event === "claim_on_hold" ? "border-orange-300" : "border-slate-100"}`}>
               <time className="tabular-nums text-slate-400" dateTime={e.created_at}>{fmtTime(e.created_at)}</time>
               <span className={`truncate font-medium ${e.status === "error" ? "text-rose-700" : human ? "text-brand-700" : started ? "text-slate-500" : "text-slate-800"}`}>
@@ -488,7 +506,7 @@ function AuditLog({ events, claimId, q, page }: { events: AuditEvent[]; claimId:
                   <span className={`font-normal ${long ? "text-indigo-700" : "text-slate-400"}`}> · took {fmtMs(e.duration_ms)}</span>
                 )}
               </span>
-              <span className="min-w-0 break-words text-slate-600">
+              <span className="col-span-2 min-w-0 break-words text-slate-600 sm:col-span-1">
                 <span className="text-slate-400">{e.event.replaceAll("_", " ")}</span>{" "}
                 {e.event === "agent_completed" && Object.keys(returned).length > 0 ? (
                   <details className="inline">
@@ -519,13 +537,15 @@ export default async function ClaimPage({ params, searchParams }: {
     if (err instanceof ApiError && err.status === 404) notFound();
     throw err;
   }
-  const [audit, patient] = await Promise.all([
+  const [audit, patient, user] = await Promise.all([
     serverApi<AuditEvent[]>(`/api/claim-bundles/${id}/audit`).catch(() => []),
     claim.patient_id ? serverApi<Patient>(`/api/patients/${claim.patient_id}`).catch(() => null) : Promise.resolve(null),
+    currentUser(),
   ]);
 
   const status = claim.summary.status;
   const running = status === "QUEUED" || status === "PROCESSING";
+  const canDelete = user?.role === "admin" && !running;      // admins delete; never a claim mid-run
   const result = claim.result ?? {};
   const out = result.decision;
   const ov = claim.override;
@@ -557,6 +577,7 @@ export default async function ClaimPage({ params, searchParams }: {
             {claim.confidence != null && <span className="text-sm tabular-nums text-slate-500" title="weighted agent confidence">confidence {pct(claim.confidence)}</span>}
             <Badge value={shown} />
             <Badge value={status} />
+            {canDelete && <DeleteClaimButton claimId={claim.bundle_id} />}
           </div>
         </div>
 
@@ -566,7 +587,7 @@ export default async function ClaimPage({ params, searchParams }: {
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" aria-hidden />
               {current.length === 0
                 ? (status === "QUEUED" ? "Pending: waiting to start" : "Starting…")
-                : current.map((s) => ["classify", "extract"].includes(s.key)
+                : current.map((s) => PAGE_STEPS.includes(s.key as never)
                   ? `${s.label} agent: ${s.note} · ${elapsed(s.startedAt)}`
                   : `${s.label} agent running · ${elapsed(s.startedAt)}`).join(" · ")}
             </p>
@@ -575,7 +596,7 @@ export default async function ClaimPage({ params, searchParams }: {
                 In progress: the {longStep.label.toLowerCase()} step has run over {LONG_STEP_S}s. It keeps working in the background; you can leave this page. Only one claim runs at a time, so new uploads wait until it finishes.
               </p>
             ) : (
-              <p className="mt-0.5 text-xs">Every page is classified first. If a page is unknown or blurry, the claim stops on hold for a person before anything is read. Then each page is preprocessed and extracted in one step, one page at a time; KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. This page updates every few seconds.</p>
+              <p className="mt-0.5 text-xs">Every page is classified first. If a page is unknown or blurry, the claim stops on hold for a person before anything is read. Then each page is preprocessed (image → text) and extracted (fields) in one step, one page at a time; KYC and claims → policy run in parallel, then fraud, then the orchestrator decides. This page updates every few seconds.</p>
             )}
             <div className="mt-2"><StopButton claimId={claim.bundle_id} /></div>
           </div>
@@ -609,6 +630,22 @@ export default async function ClaimPage({ params, searchParams }: {
 
       {onHold && result.hold && (
         <HoldPanel claimId={claim.bundle_id} hold={result.hold} waitingAtHold={result.awaiting === "ingest_hold"} />
+      )}
+      {result.duplicate?.is_duplicate && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900" role="status">
+          <p className="text-sm font-semibold">Possible duplicate claim: human review needed</p>
+          <p className="mt-0.5 text-xs">
+            This patient{result.duplicate.member_id ? ` (${result.duplicate.member_id})` : ""} already has a claim with the same date of service
+            ({result.duplicate.service_date ?? "—"}) and amount
+            ({result.duplicate.claim_amount != null ? `${Number(result.duplicate.claim_amount).toLocaleString()}` : "—"}),
+            so the agents were skipped and it is escalated to a person. Compare it with the original before approving or rejecting.
+          </p>
+          {result.duplicate.duplicate_of && (
+            <Link href={`/bundles/${result.duplicate.duplicate_of}`} className="mt-2 inline-block text-xs font-semibold underline">
+              Open the original claim →
+            </Link>
+          )}
+        </div>
       )}
       {status === "STOPPED" && (
         <div className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-slate-800" role="status">
@@ -669,6 +706,7 @@ export default async function ClaimPage({ params, searchParams }: {
                         {!running && issue && (
                           <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name} />
                         )}
+                        {canDelete && claim.documents.length > 1 && <DeletePageButton claimId={claim.bundle_id} docId={d.case_id} />}
                         <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
                         </svg>

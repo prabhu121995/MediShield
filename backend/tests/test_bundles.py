@@ -152,7 +152,8 @@ class CreateBundleTests(unittest.TestCase):
                                    "needs_review": False})
             return bundle_id
 
-        fake_db = mock.Mock()
+        self.db = fake_db = mock.Mock()
+        fake_db.next_case_no.return_value = "C002"
         fake_db.insert_bundle.side_effect = insert_bundle
         fake_db.get_bundle.side_effect = lambda bid, **kw: self.bundles.get(bid)
         fake_db.list_cases.side_effect = lambda bundle_id=None, **kw: [c for c in self.cases if c["bundle_id"] == bundle_id]
@@ -197,6 +198,17 @@ class CreateBundleTests(unittest.TestCase):
         self.assertEqual({e["bundle_id"] for e in self.enqueued}, {body["bundle_id"]})
         self.assertEqual(body["summary"]["status"], "QUEUED")
         self.assertEqual(body["created_by"], "agent1")
+
+    def test_untitled_claim_is_named_case_number_and_member_id(self):
+        self.patients["p1"]["member_id"] = "PT_20745"
+        res = self.post([("claim.png", png_bytes())], title="", patient_id="p1")
+        self.assertEqual(res.status_code, 202, res.text)
+        self.assertEqual(self.bundles[res.json()["bundle_id"]]["title"], "C002_PT_20745")
+
+    def test_untitled_claim_with_no_patient_yet_is_the_case_number(self):
+        res = self.post([("claim.png", png_bytes())], title="")
+        self.assertEqual(res.status_code, 202, res.text)
+        self.assertEqual(self.bundles[res.json()["bundle_id"]]["title"], "C002")
 
     def test_each_file_takes_its_card_category(self):
         res = self.post([("claim.png", png_bytes()), ("rx.png", png_bytes()), ("unknown.png", png_bytes())],
@@ -302,7 +314,7 @@ class CreateBundleTests(unittest.TestCase):
     def test_blank_title_gets_a_default(self):
         res = self.post([("a.png", png_bytes()), ("b.png", png_bytes())], title=" ")
         self.assertEqual(res.status_code, 202, res.text)
-        self.assertRegex(res.json()["title"], r"^Claim \d{4}-\d{2}-\d{2} \(2 documents\)$")
+        self.assertEqual(res.json()["title"], "C002")
 
     def test_overlong_title_is_refused(self):
         self.assertEqual(self.post([("a.png", png_bytes())], title="x" * 161).status_code, 422)
@@ -330,7 +342,7 @@ class CreateBundleTests(unittest.TestCase):
         main.db.list_bundles.side_effect = lambda **kw: []
         main.db.cases_for_bundles.side_effect = lambda ids: {}
         for name, expected in (("approved", {"decision": "APPROVE"}), ("rejected", {"decision": "REJECT"}),
-                               ("review", {"status": ("NEEDS_REVIEW", "ON_HOLD"), "oldest_first": True})):
+                               ("review", {"status": ("NEEDS_REVIEW", "ON_HOLD")})):
             self.assertEqual(self.client.get(f"/api/queues/{name}").status_code, 200)
             kwargs = main.db.list_bundles.call_args.kwargs
             self.assertEqual({k: kwargs[k] for k in expected}, expected)

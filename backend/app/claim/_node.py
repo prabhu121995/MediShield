@@ -24,7 +24,7 @@ AUDIT_KEYS = ("error", "decision", "confidence", "kyc_passed", "flags", "fail_re
               "doc_type", "classified_as", "file_name", "read_confidence", "classifier_confidence",
               "classifier_source", "image_quality", "is_blurry", "blur_variance", "text_chars",
               "fields_extracted", "fields_marked_missing", "skipped", "action", "note", "step", "text_quality",
-              "insurance_cards")
+              "insurance_cards", "is_duplicate", "duplicate_of", "service_date", "claim_amount", "checked")
 
 
 class ClaimCancelled(BaseException):
@@ -96,6 +96,8 @@ def describe(agent: str, out: dict) -> str:
         below = raw and raw != out.get("doc_type")
         return (f"type {out.get('doc_type')} at {_pct(out.get('classifier_confidence'))} confidence"
                 + (f" (model said {raw}, below the confidence threshold)" if below else "") + blur)
+    if agent == "preprocess":
+        return f"{out.get('text_chars', 0):,} characters of text (image {out.get('text_quality', 'clear')})"
     if agent == "extract":
         return (f"{out.get('text_chars', 0):,} characters of text (image {out.get('text_quality', 'clear')}); "
                 f"{len(out.get('fields_extracted') or [])} field(s) read: {_join(out.get('fields_extracted'))}; "
@@ -118,6 +120,8 @@ def describe(agent: str, out: dict) -> str:
     if agent == "fraud":
         return (f"fraud score {out.get('fraud_score', 0)} ({out.get('risk_level', '-')}); "
                 f"tags: {_join(out.get('tags'))}")
+    if agent == "duplicate_check":
+        return out.get("summary", "")
     if agent == "decide":
         return (f"{out.get('decision')} at {_pct(out.get('confidence'))} confidence; "
                 f"reasons: {'; '.join(out.get('reasons') or []) or 'none'}")

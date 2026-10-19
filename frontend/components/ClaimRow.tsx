@@ -89,19 +89,54 @@ function DocSlots({ docs }: { docs: CaseSummary[] }) {
   );
 }
 
+const REASON_TONE: Record<string, string> = {
+  ON_HOLD: "bg-orange-50 text-orange-800 ring-orange-200",
+  REJECTED: "bg-rose-50 text-rose-800 ring-rose-200",
+  FAILED: "bg-rose-50 text-rose-800 ring-rose-200",
+};
+
+// Why the claim is where it is: a reviewer's note when a person decided, else the reasons the
+// agents escalated or rejected it (or put it on hold). Approved with no reasons: checks passed.
+function Reasons({ claim, status }: { claim: ClaimBundle; status: string | null | undefined }) {
+  const ov = claim.override;
+  if (ov) {
+    return (
+      <span className="block truncate text-xs text-slate-600" title={ov.note}>
+        <span className="font-semibold text-slate-800">Reviewer {ov.reviewer}:</span> {ov.note || ov.decision.toLowerCase()}
+      </span>
+    );
+  }
+  const reasons = claim.reasons ?? [];
+  if (reasons.length === 0) {
+    return status === "APPROVED" ? <span className="text-xs text-emerald-700">All checks passed</span> : null;
+  }
+  const tone = REASON_TONE[status ?? ""] ?? "bg-amber-50 text-amber-900 ring-amber-200";
+  return (
+    <span className="flex min-w-0 flex-wrap gap-1" title={reasons.join("\n")}>
+      {reasons.slice(0, 2).map((r) => (
+        <span key={r} className={`max-w-full truncate rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${tone}`}>{r}</span>
+      ))}
+      {reasons.length > 2 && <span className="px-1 py-0.5 text-[11px] text-slate-500">+{reasons.length - 2} more</span>}
+    </span>
+  );
+}
+
 // One claim as a row, the same in "All claims" and every queue: title (and an optional line
-// under it, e.g. why it is in the queue), patient (name and member ID), the five document slots,
+// under it), why it is there (reasons), patient (name and member ID), the five document slots,
 // date and status.
 export default function ClaimRow({ claim, patient, status, subtitle }: {
   claim: ClaimBundle; patient?: Pick<Patient, "full_name" | "member_id">; status?: string | null; subtitle?: React.ReactNode;
 }) {
+  const shown = status ?? claim.status ?? claim.summary.status;
   return (
     <Link href={`/bundles/${claim.bundle_id}`}
       className="flex items-center justify-between gap-4 rounded-xl bg-slate-50/70 px-4 py-3 ring-1 ring-slate-200/70 transition duration-200 hover:bg-white hover:shadow-sm">
-      <span className="min-w-0 flex-1">
+      <span className="min-w-0 flex-1 md:w-64 md:flex-none">
         <span className="block truncate text-sm font-medium text-slate-900">{claim.title}</span>
         {subtitle && <span className="mt-0.5 block truncate text-xs text-slate-500">{subtitle}</span>}
+        <span className="mt-1 block md:hidden"><Reasons claim={claim} status={shown} /></span>
       </span>
+      <span className="hidden min-w-0 flex-1 md:block"><Reasons claim={claim} status={shown} /></span>
       <span className="hidden w-44 shrink-0 lg:block">
         {claim.patient_id ? (
           <>
@@ -114,7 +149,7 @@ export default function ClaimRow({ claim, patient, status, subtitle }: {
       <span className="hidden w-36 shrink-0 text-xs text-slate-500 xl:block">{fmt(claim.created_at)}</span>
       {/* Fixed width, right-aligned: pills differ in width ("Needs review" vs "Stopped"),
           so a sized column keeps the slots and dates lined up from row to row. */}
-      <span className="flex w-28 shrink-0 justify-end"><StatusPill status={status ?? claim.status ?? claim.summary.status} /></span>
+      <span className="flex w-28 shrink-0 justify-end"><StatusPill status={shown} /></span>
     </Link>
   );
 }

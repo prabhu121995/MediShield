@@ -5,7 +5,9 @@
     "CLAIM_FORM": {
       "description": "medical insurance claim / bill (e.g. CMS-1500, UB-04): billed procedures, diagnoses, charges, provider",
       "fields": {
-        "patient_name": "string", "date_of_birth": "date", "policy_number": "string", "member_id": "string",
+        "patient_name": "string", "date_of_birth": "date",
+        "policy_number": "string (the insured's own policy / member ID: UB-04 box 60 'Insured Unique ID', CMS-1500 box 1a 'Insured's ID Number'; never the employer group number: UB-04 box 57/62, CMS-1500 box 11, often GRP-...)",
+        "member_id": "string",
         "claim_number": "string", "service_date": "date", "admission_date": "date", "discharge_date": "date",
         "claim_amount": "number (total billed)", "icd10_codes": "list of strings", "cpt_codes": "list of strings",
         "provider_npi": "string (rendering provider NPI)", "physician_signature": "string (signing physician) or null if unsigned"
@@ -83,6 +85,9 @@
     "insurance_card_keywords": ["insurance", "member", "medicare", "health plan"],
     "card_expired_phrases": ["CARD EXPIRED", "EXPIRED CARD", "EXPIRED"]
   },
+
+  "_duplicate_review": "true: a claim whose patient already has a stored claim with the same date of service and amount is escalated to human review as a duplicate.",
+  "duplicate_review": true,
 
   "fraud": {
     "id_expired": {"severity": 0.6},
