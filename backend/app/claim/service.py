@@ -491,23 +491,6 @@ def delete_claim(claim_id: str, user: str) -> None:
                          "files": [d["file_name"] for d in docs]})
 
 
-def delete_document(claim_id: str, doc_id: str, user: str) -> None:
-    """Delete one page of a claim, then re-run the claim on the pages left. The last page
-    cannot be deleted: delete the claim instead."""
-    ensure_idle(claim_id)
-    docs = db.bundle_documents(claim_id)
-    row = next((r for r in docs if r["case_id"] == doc_id), None)
-    if row is None:
-        raise KeyError(doc_id)
-    if len(docs) == 1:
-        raise ValueError("this is the claim's only page: delete the claim instead")
-    db.delete_case(doc_id)
-    _remove_upload((row.get("result") or {}).get("file_path"))
-    audit.record(claim_id, user, "document_deleted", doc_id=doc_id,
-                 detail={"file_name": row["file_name"], "doc_type": row.get("doc_type")})
-    rerun_claim(claim_id, user)
-
-
 STATUS_BY_REVIEW = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "ESCALATE": "NEEDS_REVIEW"}
 
 

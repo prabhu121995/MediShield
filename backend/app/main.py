@@ -786,19 +786,6 @@ def delete_bundle(bundle_id: str, user: dict = ADMIN_ONLY):
     return Response(status_code=204)
 
 
-@app.delete("/api/claim-bundles/{bundle_id}/documents/{doc_id}", status_code=202)
-def delete_claim_document(bundle_id: str, doc_id: str, user: dict = ADMIN_ONLY):
-    """Delete one page of a claim; the claim re-runs on the pages left."""
-    _claim_for_action(bundle_id)
-    try:
-        claims_service.delete_document(bundle_id, doc_id, user["username"])
-    except KeyError as exc:
-        raise HTTPException(404, f"document {exc.args[0]} is not part of this claim") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return get_bundle(bundle_id, user)
-
-
 @app.get("/api/policies")
 def list_policies(user: dict = ANY_USER):
     return db.list_policy_documents()

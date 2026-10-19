@@ -22,6 +22,8 @@ const LABELS: Record<string, string> = {
   ESCALATE: "Escalate",
   APPROVE: "Approve",
   REJECT: "Reject",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
   PROCESSING: "In progress",
   QUEUED: "Pending",
   REVIEWED: "Reviewed",

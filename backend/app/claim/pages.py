@@ -23,7 +23,7 @@ import time
 
 from app import audit, config
 from app.blur import laplacian_variance
-from app.claim import vision
+from app.claim import guardrails, vision
 from app.claim._node import check_cancelled, emit, started
 from app.claim.state import ClaimState
 
@@ -146,9 +146,12 @@ def extract_agent(state: ClaimState) -> dict:
     """Preprocess + extract: the page as text, then that type's fields from the text."""
     def work(doc, page):
         read = _preprocess(state, doc, page)
-        out = extract(read["text"], page.get("doc_type") or "UNKNOWN")
+        doc_type = page.get("doc_type") or "UNKNOWN"
+        text, flags = guardrails.check_input(read["text"])
+        out = extract(text, doc_type)
+        flags += guardrails.check_output(out, text, doc_type)
         own = {"raw_text": read["text"], "text_chars": len(read["text"]), "text_quality": read["image_quality"],
-               **out, "fields_extracted": sorted(k for k, v in (out.get("fields") or {}).items()
+               **out, "guardrail_flags": flags, "fields_extracted": sorted(k for k, v in (out.get("fields") or {}).items()
                                                  if v not in (None, "", [], {}))}
         if read["image_quality"] != "clear":
             own["read_confidence"] = min(page.get("read_confidence", 0.9),

@@ -32,6 +32,7 @@ class IngestedDoc(TypedDict, total=False):
     classifier_source: str      # vision | human_override
     classified_as: str          # what the model said, before the confidence threshold
     fields: dict[str, Any]      # identity and date fields read from the page
+    guardrail_flags: list[dict] # input/output guardrail hits (claim/guardrails.py)
     error: str
 
 

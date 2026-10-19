@@ -194,6 +194,8 @@ export interface PolicyAnswer {
   codes: PolicyCodeCheck[];
   diagnoses: string[];
   sources: PolicySource[];
+  /** Set when a guardrail refused the question ("I don't know"). */
+  guardrail?: "off_topic" | "injection" | null;
 }
 
 export function askPolicy(message: string, history: { role: "user" | "assistant"; content: string }[]) {
@@ -372,11 +374,6 @@ export function replaceDocument(id: string, docId: string, file: File) {
 // Admin only: delete a claim that is not running, with its pages. The audit log keeps it.
 export function deleteClaim(id: string) {
   return call<void>(`/claim-bundles/${id}`, { method: "DELETE" });
-}
-
-// Admin only: delete one page of the claim, then the claim re-runs on the pages left.
-export function deleteDocument(id: string, docId: string) {
-  return call<ClaimBundle>(`/claim-bundles/${id}/documents/${docId}`, { method: "DELETE" });
 }
 
 // Re-upload every page of the claim, then it re-runs.

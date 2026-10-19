@@ -81,24 +81,6 @@ class DeleteServiceTests(unittest.TestCase):
         finally:
             pathlib.Path(outside.name).unlink(missing_ok=True)
 
-    def test_delete_page_removes_it_and_reruns_the_claim(self):
-        service.delete_document("c1", "d2", "admin1")
-        self.db.delete_case.assert_called_once_with("d2")
-        self.assertFalse(self.files[1].exists())
-        self.assertTrue(self.files[0].exists())
-        self.db.update_bundle.assert_called_once()              # queued again
-        service._executor.submit.assert_called_once()
-
-    def test_last_page_is_not_deleted(self):
-        self.db.bundle_documents.return_value = self.db.bundle_documents.return_value[:1]
-        with self.assertRaises(ValueError):
-            service.delete_document("c1", "d1", "admin1")
-        self.db.delete_case.assert_not_called()
-
-    def test_unknown_page_is_keyerror(self):
-        with self.assertRaises(KeyError):
-            service.delete_document("c1", "nope", "admin1")
-
 
 class DeleteApiTests(unittest.TestCase):
     def setUp(self):
@@ -122,7 +104,6 @@ class DeleteApiTests(unittest.TestCase):
     def test_agents_cannot_delete(self):
         self.as_user(AGENT)
         self.assertEqual(self.client.delete("/api/claim-bundles/c1").status_code, 403)
-        self.assertEqual(self.client.delete("/api/claim-bundles/c1/documents/d1").status_code, 403)
         self.assertEqual(self.client.delete("/api/patients/p1").status_code, 403)
         self.db.delete_patient.assert_not_called()
 

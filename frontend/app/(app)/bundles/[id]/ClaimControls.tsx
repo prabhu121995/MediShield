@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import ConfirmDelete from "@/components/ConfirmDelete";
-import { ClaimHold, deleteClaim, deleteDocument, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, resumeClaim, stopClaim } from "@/lib/api";
+import { ClaimHold, deleteClaim, replaceAllDocuments, replaceDocument, rerunClaim, resolveHold, resumeClaim, stopClaim } from "@/lib/api";
 import { allowedFile, MAX_BATCH_FILES, UPLOAD_EXTENSIONS } from "@/lib/settings";
 
 const ACCEPT = UPLOAD_EXTENSIONS.join(",");
@@ -69,11 +69,6 @@ export function DeleteClaimButton({ claimId }: { claimId: string }) {
 }
 
 // Admin only: delete one page; the claim re-runs on the pages left.
-export function DeletePageButton({ claimId, docId }: { claimId: string; docId: string }) {
-  return <ConfirmDelete small label="Delete" question="Delete this page and re-run the claim?"
-    action={() => deleteDocument(claimId, docId)} />;
-}
-
 // Re-upload one page: a hidden file input behind a button. The claim re-runs; pages already
 // read come from the model cache, so only the new page costs model time.
 export function ReplacePageButton({ claimId, docId, fileName, label = "Re-upload" }: {

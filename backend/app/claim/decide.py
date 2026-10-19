@@ -8,6 +8,7 @@ after every upstream branch has written its output into the shared state.
               OR the insurance card is not valid (KYC asks for a person)
               OR any agent confidence < 0.6 (a page, kyc, claims, policy, fraud)
               OR an agent errored, a page is UNKNOWN, or a required document is missing
+              OR a guardrail fired on a page (injected instructions, impossible values)
     REJECT    the claimant's name is not a member (KYC failed) OR a procedure is not covered
     APPROVE   name is a member + card valid + covered + fraud score < 0.3
 
@@ -80,6 +81,8 @@ def decide(state: ClaimState) -> dict:
     for d in state.get("docs") or []:
         if d.get("is_blurry"):
             escalate.append(f"{d.get('file_name')} is blurry (model: {d.get('image_quality')}, Laplacian variance {d.get('blur_variance')})")
+        for g in d.get("guardrail_flags") or []:
+            escalate.append(f"guardrail on {d.get('file_name')}: {g['code']} {g['message']}")
     if plan.get("unknown_documents"):
         escalate.append("unrecognised document(s): " + ", ".join(plan["unknown_documents"]))
     if plan.get("missing_required"):

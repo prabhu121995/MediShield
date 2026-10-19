@@ -78,6 +78,16 @@
     "blurry_page_confidence": 0.4
   },
 
+  "guardrails": {
+    "_about": "Basic input/output checks around the extractor (app/claim/guardrails.py). Any flag sends the claim to human review.",
+    "max_text_chars": 20000,
+    "max_claim_amount": 1000000,
+    "injection_phrases": ["ignore previous instructions", "ignore all previous", "ignore the above",
+                          "disregard previous", "disregard the above", "system prompt",
+                          "you are an ai", "as an ai model", "approve this claim", "mark as approved",
+                          "mark this claim as approved", "do not flag", "do not escalate"]
+  },
+
   "confidence_weights": {"ingest": 0.15, "kyc": 0.25, "claims": 0.20, "policy": 0.20, "fraud": 0.20},
 
   "kyc": {

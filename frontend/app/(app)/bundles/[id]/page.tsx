@@ -11,7 +11,7 @@ import { AgentSummary, AuditEvent, ClaimBundle, ClaimResult, Patient } from "@/l
 import { claimProgress, fmtMs, PAGE_STEPS, PageProgress, Progress, Stage, StageState } from "@/lib/progress";
 import { ApiError, currentUser, serverApi } from "@/lib/server-api";
 import { LONG_STEP_S } from "@/lib/settings";
-import { DeleteClaimButton, DeletePageButton, HoldPanel, ReplacePageButton, ResumeButton, StopButton } from "./ClaimControls";
+import { DeleteClaimButton, HoldPanel, ReplacePageButton, ResumeButton, StopButton } from "./ClaimControls";
 import ClaimReview from "./ClaimReview";
 
 export const dynamic = "force-dynamic";
@@ -573,10 +573,24 @@ export default async function ClaimPage({ params, searchParams }: {
               {claim.documents.length} document(s) · submitted by {claim.created_by} on {fmt(claim.created_at)}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            {claim.confidence != null && <span className="text-sm tabular-nums text-slate-500" title="weighted agent confidence">confidence {pct(claim.confidence)}</span>}
-            <Badge value={shown} />
-            <Badge value={status} />
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <dl className="flex items-stretch divide-x divide-slate-200 rounded-xl bg-slate-50/80 ring-1 ring-slate-200/80">
+              <div className="px-3.5 py-1.5" title="The verdict: from the AI orchestrator, or from a reviewer who overrode it">
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  Decision{shown ? (ov ? " · reviewer" : " · AI") : ""}
+                </dt>
+                <dd className="mt-0.5 flex items-center gap-2">
+                  <Badge value={shown} />
+                  {shown && claim.confidence != null && !ov && (
+                    <span className="text-xs tabular-nums text-slate-500" title="weighted agent confidence">{pct(claim.confidence)} confidence</span>
+                  )}
+                </dd>
+              </div>
+              <div className="px-3.5 py-1.5" title="Where the claim is in the workflow">
+                <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Claim status</dt>
+                <dd className="mt-0.5"><Badge value={status} /></dd>
+              </div>
+            </dl>
             {canDelete && <DeleteClaimButton claimId={claim.bundle_id} />}
           </div>
         </div>
@@ -703,10 +717,10 @@ export default async function ClaimPage({ params, searchParams }: {
                             <circle cx="12" cy="12" r="3" />
                           </svg>
                         </a>
-                        {!running && issue && (
-                          <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name} />
+                        {!running && (
+                          <ReplacePageButton claimId={claim.bundle_id} docId={d.case_id} fileName={d.file_name}
+                            label={issue ? "Re-upload" : "Replace"} />
                         )}
-                        {canDelete && claim.documents.length > 1 && <DeletePageButton claimId={claim.bundle_id} docId={d.case_id} />}
                         <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
                         </svg>

@@ -105,7 +105,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function Bubble({ message, onRetry }: { message: Message; onRetry: (q: string) => void }) {
+function Bubble({ message, onRetry, busy }: { message: Message; onRetry: (q: string) => void; busy: boolean }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end animate-fade-up">
@@ -122,10 +122,15 @@ function Bubble({ message, onRetry }: { message: Message; onRetry: (q: string) =
       <div className="min-w-0 max-w-[88%] space-y-3">
         <div className={`rounded-2xl rounded-tl-md px-4 py-2.5 text-sm leading-relaxed shadow-sm ring-1 ${
           message.error ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-white text-slate-800 ring-slate-200"}`}>
+          {r?.guardrail && (
+            <span className="mb-1.5 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-inset ring-slate-500/20">
+              Out of scope
+            </span>
+          )}
           <p className="whitespace-pre-wrap">{message.content}</p>
           {message.error && message.question && (
-            <button type="button" onClick={() => onRetry(message.question!)}
-              className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 ring-1 ring-rose-200 transition hover:bg-rose-100">
+            <button type="button" onClick={() => onRetry(message.question!)} disabled={busy}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 ring-1 ring-rose-200 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50">
               ↻ Try again
             </button>
           )}
@@ -241,8 +246,8 @@ export default function PolicyChat() {
             </div>
             <div className="flex flex-wrap justify-center gap-2">
               {SUGGESTIONS.map((s) => (
-                <button key={s} type="button" onClick={() => send(s)}
-                  className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-brand-700 ring-1 ring-slate-200 transition duration-200 hover:-translate-y-px hover:bg-brand-50 hover:shadow-sm">
+                <button key={s} type="button" onClick={() => send(s)} disabled={busy}
+                  className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-brand-700 ring-1 ring-slate-200 transition duration-200 hover:-translate-y-px hover:bg-brand-50 hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50">
                   {s}
                 </button>
               ))}
@@ -251,7 +256,7 @@ export default function PolicyChat() {
         )}
 
         {messages.map((m) => (
-          <Bubble key={m.id} message={m} onRetry={(q) => {
+          <Bubble key={m.id} message={m} busy={busy} onRetry={(q) => {
             // Drop the failed reply before asking again, so the thread does not fill with errors.
             setMessages((prev) => prev.filter((x) => !(x.role === "assistant" && x.error && x.question === q)));
             send(q, true);
@@ -279,15 +284,17 @@ export default function PolicyChat() {
             onKeyDown={onKeyDown}
             rows={1}
             maxLength={1000}
-            placeholder="e.g. Is CPT 17000 covered under the silver plan?"
+            disabled={busy}
+            placeholder={busy ? "Waiting for the answer…" : "e.g. Is CPT 17000 covered under the silver plan?"}
             aria-label="Ask the policy assistant"
-            className="input max-h-32 min-h-[2.75rem] resize-none py-2.5"
+            className="input max-h-32 min-h-[2.75rem] resize-none py-2.5 disabled:cursor-not-allowed disabled:bg-slate-50"
           />
-          <button type="submit" disabled={busy || !input.trim()} className="btn-primary h-11 shrink-0 px-4" aria-label="Send question">
+          <button type="submit" disabled={busy || !input.trim()} aria-busy={busy}
+            className="btn-primary h-11 shrink-0 px-4 disabled:cursor-not-allowed disabled:opacity-50" aria-label="Send question">
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
             </svg>
-            <span className="hidden sm:inline">Ask</span>
+            <span className="hidden sm:inline">{busy ? "Wait…" : "Ask"}</span>
           </button>
         </div>
         <p className="mt-2 text-[11px] text-slate-400">

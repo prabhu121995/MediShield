@@ -56,6 +56,9 @@ def fake_policy_llm(system, user):
 
 
 def page(doc_type, text="", quality="clear", confidence=0.95, missing=(), **fields):
+    # A real page prints its codes, and the output guardrail drops any code it does not.
+    printed = [c for key in ("icd10_codes", "cpt_codes") for c in fields.get(key) or []]
+    text = " ".join([text, *printed]) if printed else text
     return {"doc_type": doc_type, "confidence": confidence, "quality": quality, "text": text,
             "fields": fields, "missing": list(missing)}
 
