@@ -117,16 +117,19 @@ One claim = every document of one patient, uploaded together with no types chose
   END
 ```
 
-`fraud` and `decide` are deferred nodes, so each runs once after every branch feeding it has
-finished. Every node is wrapped by [claim/_node.py](backend/app/claim/_node.py): it writes
-`agent_started` / `agent_completed` audit rows with timing and an investigation note, and a
-failing agent writes `{"error": ...}` instead of crashing the claim.
+**How the graph runs**
 
-**The same graph in the UI**, for a claim of five documents that was approved. Green edges are
-the path taken; grey dashed nodes (ingest hold, human review) were not needed. Each card shows
-the agent's status, duration and a one-line result.
+- **Parallel:** `kyc` and `claims → policy` run side by side.
+- **Deferred:** `fraud` and `decide` wait for every branch, then run exactly once.
+- **Audited:** each node logs `agent_started` / `agent_completed` with its duration ([claim/_node.py](backend/app/claim/_node.py)).
+- **Fail-safe:** an agent that crashes returns `{"error": ...}`, and the claim escalates instead of failing.
+
+#### In the app
 
 ![Agent workflow of an approved claim: classify and extract 5/5 pages, plan, duplicate check, KYC, claims and policy in parallel, fraud score 0.00, orchestrator APPROVE at 90% confidence](docs/images/claim-workflow-approve.png)
+
+<sub>An approved five-document claim. <b>Green</b> = path taken · <b>grey dashed</b> = not
+needed (ingest hold, human review). Each card shows the agent's status, run time and result.</sub>
 
 ### 1.3 Agents
 
