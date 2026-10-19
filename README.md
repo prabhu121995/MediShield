@@ -306,6 +306,27 @@ cd backend
 
 Check: `http://127.0.0.1:8000/api/health`.
 
+#### Sign-in accounts
+
+`create_users` creates two fixed accounts. You choose the passwords in `.env` before running it:
+
+| Username | Role | Password | Can do |
+|---|---|---|---|
+| `admin` | admin | `ADMIN_PASSWORD` in `.env` | Everything: upload, review, patients, plus **Policies** (upload PDFs, policy assistant), **Audit log**, **System logs**, deleting claims and patients |
+| `agent` | agent | `AGENT_PASSWORD` in `.env` | Day-to-day claims work: upload claims, review queue, approve / reject / escalate, patients |
+
+```ini
+# .env
+ADMIN_PASSWORD=<choose a password>
+AGENT_PASSWORD=<choose a password>
+```
+
+- If a password is left empty, the script generates a random one and **prints it once** in
+  the terminal; copy it then.
+- To change a password, edit `.env` and run `create_users` again. It resets both accounts.
+- Sessions last `JWT_TTL_HOURS` (8 h by default); after that, sign in again.
+- Sign in at `http://localhost:3000/login`.
+
 ### 2.4 Frontend
 
 ```powershell
