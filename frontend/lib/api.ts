@@ -261,6 +261,14 @@ export interface FraudAnomaly {
   evidence: string[];
 }
 
+/** A page lacking required fields. Tracked for the reviewer, never part of the fraud score. */
+export interface MissingFields {
+  document: string;
+  doc_type: string;
+  fields: string[];
+  detail: string;
+}
+
 export interface ClaimResult {
   error?: string;
   thread_id?: string;          // LangGraph checkpoint thread of the latest run
@@ -279,7 +287,8 @@ export interface ClaimResult {
     claim_amount?: number | null; checked: number; summary: string; error?: string };
   policy?: { covered: boolean; exclusions: string[]; policy_clause: string; plan: string; sources: string[]; notes: string[];
     cpt_codes_checked: string[]; confidence: number; error?: string };
-  fraud?: { fraud_score: number; risk_level: string; tags: string[]; anomalies: FraudAnomaly[]; confidence: number; summary: string; error?: string };
+  fraud?: { fraud_score: number; risk_level: string; tags: string[]; anomalies: FraudAnomaly[];
+    missing_fields?: MissingFields[]; confidence: number; summary: string; error?: string };
   decision?: ClaimDecision;
   documents?: IngestedDoc[];
   trace?: AgentTrace[];

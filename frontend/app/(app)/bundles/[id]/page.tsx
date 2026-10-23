@@ -311,9 +311,19 @@ function Detail({ result, progress }: { result: ClaimResult; progress: Progress 
           <div className="h-1.5 overflow-hidden rounded-full bg-slate-100" role="meter" aria-valuenow={fraud.fraud_score} aria-valuemin={0} aria-valuemax={1} aria-label="Fraud score">
             <div className={`h-full ${fraud.fraud_score >= 0.3 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.max(3, fraud.fraud_score * 100)}%` }} />
           </div>
+          <p className="text-[11px] font-semibold text-slate-700">Fraud signals</p>
+          {fraud.anomalies.length === 0 && <p className="text-[11px] text-emerald-700">none</p>}
           {fraud.anomalies.map((a) => (
             <p key={a.type} className="text-[11px] text-amber-800"><span className="font-semibold">{a.type}</span> ({a.severity}): {a.detail}</p>
           ))}
+          {(fraud.missing_fields ?? []).length > 0 && (
+            <>
+              <p className="text-[11px] font-semibold text-slate-700">Missing fields <span className="font-normal text-slate-500">(tracked, not scored)</span></p>
+              {(fraud.missing_fields ?? []).map((m) => (
+                <p key={m.document} className="text-[11px] text-slate-600">{m.detail}</p>
+              ))}
+            </>
+          )}
         </>
       )}
     </AgentCard>

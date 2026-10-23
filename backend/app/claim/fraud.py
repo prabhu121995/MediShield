@@ -18,16 +18,15 @@ readmission_30d     two different stays (claim form, discharge summary, history)
                     later admission is within `days` of the earlier discharge, or a prior
                     discharge the summary itself reports
 date_conflict       prescription date `days` or more from the service/discharge date
-missing_field       a claim form or prescription lacks a required field (pipeline_rules
-                    document_types `required`), or the page marks a required field missing or
-                    illegible. Severity by document (`by_document`): only a claim form scores
-                    (and escalates); a prescription is flagged at 0. Optional fields are never
-                    flagged.
 
 score = 1 - product(1 - severity). Independent signals compound. Only duplicate_claim,
 amount_under_10k, proc_diag_mismatch, name_mismatch, readmission_30d and date_conflict
 score, each above the 0.3 escalation line on its own; every other tag has severity 0
 and is tracked for the reviewer only.
+
+Missing fields are reported apart from the fraud signals, as `missing_fields`: a medical page
+lacking a required field (pipeline_rules document_types `required`), or marking one missing or
+illegible. They are tracked for the reviewer and never scored. Optional fields are ignored.
 """
 
 from __future__ import annotations
@@ -45,9 +44,8 @@ def rule(tag: str) -> dict:
     return config.RULES["fraud"][tag]
 
 
-def _flag(tag: str, detail: str, evidence: list[str], severity: float | None = None) -> dict:
-    return {"type": tag, "severity": rule(tag)["severity"] if severity is None else severity,
-            "detail": detail, "evidence": evidence}
+def _flag(tag: str, detail: str, evidence: list[str]) -> dict:
+    return {"type": tag, "severity": rule(tag)["severity"], "detail": detail, "evidence": evidence}
 
 
 def duplicates(claim: dict | None, others: list[dict], history: list[dict]) -> list[dict]:
@@ -215,19 +213,20 @@ def policy_mismatch(docs: list[dict], member: dict | None) -> list[dict]:
 
 
 def missing_fields(docs: list[dict]) -> list[dict]:
-    from app.claim.claims import schema_errors      # the claims agent only extracts; the flag is ours
+    """One entry per medical page lacking required fields. Tracked, never scored."""
+    from app.claim.claims import schema_errors      # the claims agent only extracts; the check is ours
     rules = config.RULES
-    by_document = rule("missing_field")["by_document"]
+    medical = set(rules["medical_documents"])
     out = []
     for d in docs:
-        severity = by_document.get(d.get("doc_type"))
-        if severity is None:
+        if d.get("doc_type") not in medical:
             continue
         errors = schema_errors(d, rules)
         if errors:
             listed = ", ".join(e["field"] + (" (marked missing on the page)" if e["code"] == "MARKED_MISSING" else "")
                                for e in errors)
-            out.append(_flag("missing_field", f"{d['file_name']} lacks {listed}", [d["file_name"]], severity))
+            out.append({"document": d["file_name"], "doc_type": d.get("doc_type"),
+                        "fields": [e["field"] for e in errors], "detail": f"{d['file_name']} lacks {listed}"})
     return out
 
 
@@ -256,7 +255,8 @@ def assess(state: ClaimState, repo) -> dict:
 
     anomalies = (id_expiry(docs, set(kyc.get("insurance_cards") or [])) + dob_mismatch(docs, member) + policy_mismatch(docs, member) + duplicates(claim, claims.get("additional_claims") or [], claim_history)
                  + structuring(claim) + proc_diag(claim, clinical) + names(docs, member)
-                 + readmission(claim, clinical, stay_history) + rx_dates(claim, clinical) + missing_fields(docs))
+                 + readmission(claim, clinical, stay_history) + rx_dates(claim, clinical))
+    missing = missing_fields(docs)
     value = score(anomalies)
     tags = [a["type"] for a in anomalies]
     return {
@@ -264,11 +264,13 @@ def assess(state: ClaimState, repo) -> dict:
         "risk_level": risk_level(value),
         "tags": tags,
         "anomalies": anomalies,
+        "missing_fields": missing,
         "member_id": member["member_id"] if member else None,
-        "checks_run": list(config.RULES["fraud"]),
+        "checks_run": [k for k in config.RULES["fraud"] if not k.startswith("_")],
         "history_checked": {"claims": len(claim_history), "stays": len(stay_history)},
         "confidence": 0.9 if (claim or clinical) else 0.7,
-        "summary": f"score {value:.2f} ({risk_level(value)})" + (f": {', '.join(tags)}" if tags else ": no signals"),
+        "summary": f"score {value:.2f} ({risk_level(value)})" + (f": {', '.join(tags)}" if tags else ": no fraud signals")
+                   + (f"; missing fields: {'; '.join(m['detail'] for m in missing)}" if missing else ""),
     }
 
 
