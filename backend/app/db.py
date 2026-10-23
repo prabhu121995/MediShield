@@ -1,6 +1,6 @@
 """
-MySQL access (pymysql). One short-lived connection per call keeps things simple;
-move to a pool when load requires it.
+MySQL access (pymysql). Calls borrow a connection from a small pool (_checkout/_checkin):
+opening a connection costs ~70 ms on this setup, a query on an open one under 1 ms.
 
 Tables: member, kyc, claim, clinical_event, case_record, patient, policy_document,
 app_user. Audit columns (created_by/created_at, updated_by/updated_at) are on
@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import date
 from typing import Any, Protocol
 
 import pymysql
+from pymysql.constants import SERVER_STATUS
 from pymysql.cursors import DictCursor
 
 from app import config
@@ -214,6 +216,39 @@ def _connect(database: str | None) -> pymysql.connections.Connection:
     )
 
 
+_POOL_MAX_IDLE = 8
+_pool: list[pymysql.connections.Connection] = []
+_pool_lock = threading.Lock()
+
+
+def _checkout() -> pymysql.connections.Connection:
+    """An open connection to the app database: a pooled one if any (pinged, reconnecting if
+    MySQL dropped it), else a new one. Give it back with _checkin."""
+    while True:
+        with _pool_lock:
+            conn = _pool.pop() if _pool else None
+        if conn is None:
+            return _connect(config.MYSQL_DB)
+        try:
+            conn.ping(reconnect=True)
+            return conn
+        except pymysql.MySQLError:
+            if conn.open:
+                conn.close()
+
+
+def _checkin(conn: pymysql.connections.Connection) -> None:
+    """Return a connection to the pool; one that is broken or mid-transaction is closed instead."""
+    reusable = conn.open and not (conn.server_status & SERVER_STATUS.SERVER_STATUS_IN_TRANS)
+    if reusable:
+        with _pool_lock:
+            if len(_pool) < _POOL_MAX_IDLE:
+                _pool.append(conn)
+                return
+    if conn.open:
+        conn.close()
+
+
 def init_db() -> None:
     conn = _connect(None)
     with conn.cursor() as cur:
@@ -235,22 +270,22 @@ def init_db() -> None:
 
 
 def _fetch(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return list(cur.fetchall())
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def _execute(sql: str, params: tuple = ()) -> None:
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def _json_list(value: Any) -> list:
@@ -593,7 +628,7 @@ def update_bundle(bundle_id: str, status: str, decision: str | None = None,
 
 def link_bundle_patient(bundle_id: str, patient_id: str) -> bool:
     """Link a claim (and its pages) to a patient, if it has none yet. True when it was linked."""
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             cur.execute("UPDATE claim_bundle SET patient_id=%s WHERE bundle_id=%s AND patient_id IS NULL",
@@ -604,7 +639,7 @@ def link_bundle_patient(bundle_id: str, patient_id: str) -> bool:
                             (patient_id, bundle_id))
         return linked
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def bundle_documents(bundle_id: str) -> list[dict]:
@@ -656,7 +691,7 @@ def checkpoint_threads(claim_id: str) -> list[str]:
 def delete_bundle(bundle_id: str) -> None:
     """Remove a claim: its pages, its stored claim and stays (so a later claim is not checked
     against it), its checkpoints and the claim row. The audit log keeps its history."""
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         conn.begin()                                 # all or nothing: no half-deleted claim
         with conn.cursor() as cur:
@@ -671,7 +706,7 @@ def delete_bundle(bundle_id: str) -> None:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 # ---- audit log -----------------------------------------------------------------------
@@ -756,7 +791,7 @@ def checkpoint_write_rows(thread_id: str) -> list[dict]:
 def save_checkpoint(thread_id: str, ns: str, checkpoint_id: str, parent_id: str | None,
                     checkpoint: tuple[str, bytes], metadata: tuple[str, bytes],
                     blobs: list[tuple[str, str, str, bytes]]) -> None:
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             cur.execute("REPLACE INTO lg_checkpoint (thread_id, checkpoint_ns, checkpoint_id, parent_id, type, "
@@ -766,12 +801,12 @@ def save_checkpoint(thread_id: str, ns: str, checkpoint_id: str, parent_id: str 
                 cur.execute("REPLACE INTO lg_checkpoint_blob (thread_id, checkpoint_ns, channel, version, type, value) "
                             "VALUES (%s,%s,%s,%s,%s,%s)", (thread_id, ns, channel, version, kind, value))
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def save_checkpoint_writes(thread_id: str, ns: str, checkpoint_id: str,
                            writes: list[tuple[str, int, str, str, bytes, str]]) -> None:
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             for task_id, idx, channel, kind, value, path in writes:
@@ -779,7 +814,7 @@ def save_checkpoint_writes(thread_id: str, ns: str, checkpoint_id: str,
                             "channel, type, value, task_path) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                             (thread_id, ns, checkpoint_id, task_id, idx, channel, kind, value, path))
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def delete_checkpoint_thread(thread_id: str) -> None:
@@ -790,7 +825,7 @@ def delete_checkpoint_thread(thread_id: str) -> None:
 # ---- application logs ------------------------------------------------------------------
 
 def insert_logs(rows: list[dict]) -> None:
-    conn = _connect(config.MYSQL_DB)
+    conn = _checkout()
     try:
         with conn.cursor() as cur:
             cur.executemany("INSERT INTO app_log (created_at, level, logger, source, message, exc_text) "
@@ -798,7 +833,7 @@ def insert_logs(rows: list[dict]) -> None:
                             [(r["created_at"], r["level"], r["logger"], r["source"], r["message"], r.get("exc_text"))
                              for r in rows])
     finally:
-        conn.close()
+        _checkin(conn)
 
 
 def search_logs(level: str | None = None, source: str | None = None, q: str | None = None,

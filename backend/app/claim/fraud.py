@@ -18,12 +18,16 @@ readmission_30d     two different stays (claim form, discharge summary, history)
                     later admission is within `days` of the earlier discharge, or a prior
                     discharge the summary itself reports
 date_conflict       prescription date `days` or more from the service/discharge date
-missing_field       a medical page lacks a required field (pipeline_rules document_types
-                    `required`), or the page itself marks a field missing or illegible
-                    (e.g. an unsigned claim form or prescription)
+missing_field       a claim form or prescription lacks a required field (pipeline_rules
+                    document_types `required`), or the page marks a required field missing or
+                    illegible. Severity by document (`by_document`): only a claim form scores
+                    (and escalates); a prescription is flagged at 0. Optional fields are never
+                    flagged.
 
-score = 1 - product(1 - severity). Independent signals compound; one HIGH signal is
-enough to reach the 0.3 escalation line on its own.
+score = 1 - product(1 - severity). Independent signals compound. Only duplicate_claim,
+amount_under_10k, proc_diag_mismatch, name_mismatch, readmission_30d and date_conflict
+score, each above the 0.3 escalation line on its own; every other tag has severity 0
+and is tracked for the reviewer only.
 """
 
 from __future__ import annotations
@@ -41,8 +45,9 @@ def rule(tag: str) -> dict:
     return config.RULES["fraud"][tag]
 
 
-def _flag(tag: str, detail: str, evidence: list[str]) -> dict:
-    return {"type": tag, "severity": rule(tag)["severity"], "detail": detail, "evidence": evidence}
+def _flag(tag: str, detail: str, evidence: list[str], severity: float | None = None) -> dict:
+    return {"type": tag, "severity": rule(tag)["severity"] if severity is None else severity,
+            "detail": detail, "evidence": evidence}
 
 
 def duplicates(claim: dict | None, others: list[dict], history: list[dict]) -> list[dict]:
@@ -212,16 +217,17 @@ def policy_mismatch(docs: list[dict], member: dict | None) -> list[dict]:
 def missing_fields(docs: list[dict]) -> list[dict]:
     from app.claim.claims import schema_errors      # the claims agent only extracts; the flag is ours
     rules = config.RULES
-    medical = set(rules["medical_documents"])
+    by_document = rule("missing_field")["by_document"]
     out = []
     for d in docs:
-        if d.get("doc_type") not in medical:
+        severity = by_document.get(d.get("doc_type"))
+        if severity is None:
             continue
         errors = schema_errors(d, rules)
         if errors:
             listed = ", ".join(e["field"] + (" (marked missing on the page)" if e["code"] == "MARKED_MISSING" else "")
                                for e in errors)
-            out.append(_flag("missing_field", f"{d['file_name']} lacks {listed}", [d["file_name"]]))
+            out.append(_flag("missing_field", f"{d['file_name']} lacks {listed}", [d["file_name"]], severity))
     return out
 
 

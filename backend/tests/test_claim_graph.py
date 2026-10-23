@@ -365,11 +365,12 @@ class ClaimGraphTests(unittest.TestCase):
 
     # ---- fraud agent investigates every other identity question ----------------------------
 
-    def test_expired_id_date_is_a_fraud_tag_not_a_kyc_failure(self):
+    def test_expired_id_date_is_tracked_not_scored(self):
         state = self.run_claim(claim=claim(), id=id_card(expiry="2025-01-31"))
         self.assertTrue(state["kyc"]["kyc_passed"])
         self.assertIn("id_expired", state["fraud"]["tags"])
-        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertEqual(state["fraud"]["fraud_score"], 0.0)
+        self.assertEqual(self.decision(state), "APPROVE")
 
     def test_id_expiring_after_treatment_is_still_valid(self):
         state = self.run_claim(claim=claim(service="2025-03-10"), id=id_card(expiry="2025-03-20"))
@@ -447,18 +448,30 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(self.decision(state), "REJECT")
         self.assertFalse(state["policy"]["covered"])
 
-    def test_missing_required_fields_are_a_fraud_flag_not_a_claims_rejection(self):
+    def test_missing_required_fields_are_tracked_not_scored(self):
         state = self.run_claim(claim=claim(npi=None, signature=None), id=id_card())
-        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertEqual(self.decision(state), "APPROVE")
+        self.assertEqual(state["fraud"]["fraud_score"], 0.0)
         self.assertIn("missing_field", state["fraud"]["tags"])
         detail = next(a["detail"] for a in state["fraud"]["anomalies"] if a["type"] == "missing_field")
         self.assertIn("provider_npi", detail)
         self.assertNotIn("schema_errors", state["claims"])                   # the claims agent only extracts
 
-    def test_field_the_page_marks_missing_is_flagged_by_fraud(self):
-        state = self.run_claim(claim=claim(), id=id_card(), rx=rx(missing=["sig"]))
-        self.assertEqual(self.decision(state), "ESCALATE")
+    def test_prescription_missing_required_field_is_flagged_but_not_scored(self):
+        state = self.run_claim(claim=claim(), id=id_card(), rx=rx(missing=["prescriber_signature"]))
+        self.assertEqual(self.decision(state), "APPROVE")
         self.assertIn("missing_field", state["fraud"]["tags"])
+        self.assertEqual((state["fraud"]["fraud_score"], state["fraud"]["risk_level"]), (0.0, "LOW"))
+
+    def test_claim_form_marked_missing_required_field_is_tracked(self):
+        state = self.run_claim(claim=claim(missing=["physician_signature"]), id=id_card())
+        self.assertEqual(self.decision(state), "APPROVE")
+        self.assertIn("missing_field", state["fraud"]["tags"])
+
+    def test_optional_field_marked_missing_is_ignored(self):
+        state = self.run_claim(claim=claim(missing=["member_id"]), id=id_card(), rx=rx(missing=["sig"]))
+        self.assertEqual(self.decision(state), "APPROVE")
+        self.assertNotIn("missing_field", state["fraud"]["tags"])
 
     def test_claims_agent_hands_the_policy_agent_a_brief(self):
         seen: list[str] = []

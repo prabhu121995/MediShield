@@ -16,13 +16,15 @@ from app.claim.state import ClaimState
 
 
 def schema_errors(doc: dict, rules: dict) -> list[dict]:
-    """Required fields that are empty, and fields the page marks missing. Used by the fraud agent."""
+    """Required fields that are empty, or that the page marks missing. Used by the fraud agent.
+    Optional fields the page marks missing (e.g. member_id) are ignored."""
     spec = rules["document_types"].get(doc.get("doc_type"), {})
+    required = spec.get("required", [])
     fields = doc.get("fields") or {}
     errors = [{"field": f, "code": "MISSING_FIELD", "message": f"{f} is required"}
-              for f in spec.get("required", []) if fields.get(f) in (None, "", [])]
+              for f in required if fields.get(f) in (None, "", [])]
     for name in doc.get("fields_marked_missing") or []:
-        if not any(e["field"] == name for e in errors):
+        if name in required and not any(e["field"] == name for e in errors):
             errors.append({"field": name, "code": "MARKED_MISSING", "message": f"the page marks {name} as missing"})
     return errors
 

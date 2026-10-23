@@ -355,7 +355,7 @@ def claim_queue(name: Literal["review", "escalated", "approved", "rejected"], li
 @app.get("/api/review-queue")
 def review_queue(user: dict = ANY_USER):
     """Escalated claims waiting for ops staff, newest first."""
-    return claim_queue("review", user=user)
+    return claim_queue("review", offset=0, user=user)
 
 
 @app.post("/api/claim-bundles/{bundle_id}/review")

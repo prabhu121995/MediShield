@@ -100,16 +100,18 @@
   "duplicate_review": true,
 
   "fraud": {
-    "id_expired": {"severity": 0.6},
-    "dob_mismatch": {"severity": 0.6},
-    "policy_mismatch": {"severity": 0.5},
+    "id_expired": {"severity": 0.0},
+    "dob_mismatch": {"severity": 0.0},
+    "policy_mismatch": {"severity": 0.0},
     "duplicate_claim": {"severity": 0.9},
     "amount_under_10k": {"severity": 0.6, "low": 9000, "high": 10000},
     "proc_diag_mismatch": {"severity": 0.5, "procedure_ranges": [[59000, 59899]], "required_diagnosis_prefixes": ["O"]},
     "name_mismatch": {"severity": 0.7},
     "readmission_30d": {"severity": 0.7, "days": 30},
     "date_conflict": {"severity": 0.6, "days": 45},
-    "missing_field": {"severity": 0.4}
+    "_about": "Scored fraud signals (each above fraud_escalate_min, so one alone escalates): duplicate_claim, amount_under_10k, proc_diag_mismatch, name_mismatch, readmission_30d, date_conflict. Every other tag has severity 0: tracked for the reviewer, never scored.",
+    "_missing_field": "Required fields missing on a claim form or prescription are tracked only (severity 0). A document type not listed is never flagged.",
+    "missing_field": {"severity": 0.0, "by_document": {"CLAIM_FORM": 0.0, "PRESCRIPTION": 0.0}}
   },
 
   "policy": {
