@@ -20,8 +20,7 @@ agents/notebook/   original research notebooks (reference only, not used at runt
 
 ![MediShield Intake architecture. Presentation: browser to the Next.js UI on port 3000. Application: FastAPI on port 8000 to the claim service (queue, one worker thread) to the LangGraph claim graph: classify, ingest hold, extract, plan, duplicate check, then KYC in parallel with claims and policy (RAG), then fraud, decide and human review on ESCALATE. Data and services: AI models (Gemini, Groq, Ollama), Qdrant, MySQL, optional LangSmith tracing, and files on disk](docs/images/architecture.png)
 
-<sub>Editable source: [docs/architecture.drawio](docs/architecture.drawio) (open in draw.io, then
-*File → Export as → PNG*). The text version below has the same parts.</sub>
+
 
 ```
 ┌──────────────────────────── PRESENTATION ────────────────────────────┐
