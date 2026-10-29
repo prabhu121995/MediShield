@@ -12,7 +12,6 @@ const NAV: Nav[] = [
   { href: "/", label: "Cases", roles: ["admin", "agent"], icon: "M4 6h16M4 12h16M4 18h10" },
   { href: "/bundles", label: "Claims", roles: ["admin", "agent"], icon: "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" },
   { href: "/review", label: "Review queue", roles: ["admin", "agent"], icon: "M9 12l2 2 4-4m5.6-4.4A11.9 11.9 0 0112 2.9 11.9 11.9 0 013.4 5.6 12 12 0 003 9c0 5.6 3.8 10.3 9 11.6 5.2-1.3 9-6 9-11.6 0-1.2-.1-2.3-.4-3.4z" },
-  { href: "/escalated", label: "Escalated", roles: ["admin", "agent"], icon: "M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" },
   { href: "/approved", label: "Approved", roles: ["admin", "agent"], icon: "M5 13l4 4L19 7" },
   { href: "/rejected", label: "Rejected", roles: ["admin", "agent"], icon: "M6 6l12 12M6 18L18 6" },
   { href: "/patients", label: "Patients", roles: ["admin", "agent"], icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" },
@@ -24,7 +23,7 @@ const NAV: Nav[] = [
 // Light sidebar: white panel, slate text, and the current page marked with a soft brand
 // background and an accent bar on the left edge.
 // Lists whose count is work waiting for a person.
-const NEEDS_PERSON = new Set(["/review", "/escalated"]);
+const NEEDS_PERSON = new Set(["/review"]);
 
 // `counts`: the number beside each list (keyed by href); lists without one show no badge.
 export function SidebarBody({ user, counts = {}, onNavigate }: { user: User; counts?: Record<string, number>; onNavigate?: () => void }) {

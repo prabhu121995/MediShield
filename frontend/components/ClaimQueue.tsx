@@ -6,16 +6,15 @@ import { Patient, QueueItem } from "@/lib/api";
 import { apiQuery, pageOf, pageRows, Params } from "@/lib/paging";
 import { serverApi } from "@/lib/server-api";
 
-export type QueueName = "review" | "escalated" | "approved" | "rejected";
+export type QueueName = "review" | "approved" | "rejected";
 
 const COPY: Record<QueueName, { title: string; empty: string }> = {
   review: { title: "Review queue", empty: "Nothing waiting. Escalated claims will appear here." },
-  escalated: { title: "Escalated", empty: "No escalated claims waiting." },
   approved: { title: "Approved", empty: "No approved claims yet." },
   rejected: { title: "Rejected", empty: "No rejected claims yet." },
 };
 
-// One list for the four queues, the same card and rows as "All claims" on the Claims page.
+// One list for the three queues, the same card and rows as "All claims" on the Claims page.
 // Each row opens the claim page (decision, agents, review, audit).
 export default async function ClaimQueue({ name, params = {} }: { name: QueueName; params?: Params }) {
   const page = pageOf(params);
@@ -59,4 +58,4 @@ export default async function ClaimQueue({ name, params = {} }: { name: QueueNam
   );
 }
 
-const QUEUES: [QueueName, string][] = [["review", "Review"], ["escalated", "Escalated"], ["approved", "Approved"], ["rejected", "Rejected"]];
+const QUEUES: [QueueName, string][] = [["review", "Review"], ["approved", "Approved"], ["rejected", "Rejected"]];

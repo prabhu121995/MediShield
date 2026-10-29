@@ -18,6 +18,11 @@ agents/notebook/   original research notebooks (reference only, not used at runt
 
 ### 1.1 Components
 
+![MediShield Intake architecture. Presentation: browser to the Next.js UI on port 3000. Application: FastAPI on port 8000 to the claim service (queue, one worker thread) to the LangGraph claim graph: classify, ingest hold, extract, plan, duplicate check, then KYC in parallel with claims and policy (RAG), then fraud, decide and human review on ESCALATE. Data and services: AI models (Gemini, Groq, Ollama), Qdrant, MySQL, optional LangSmith tracing, and files on disk](docs/images/architecture.png)
+
+<sub>Editable source: [docs/architecture.drawio](docs/architecture.drawio) (open in draw.io, then
+*File → Export as → PNG*). The text version below has the same parts.</sub>
+
 ```
 ┌──────────────────────────── PRESENTATION ────────────────────────────┐
 │  Browser                                                             │
@@ -59,7 +64,7 @@ agents/notebook/   original research notebooks (reference only, not used at runt
 
 | Layer | Responsibility | Code |
 |---|---|---|
-| UI | Claims upload and history; claim page (decision, agent cards, review panel, audit trail); review queue; escalated / approved / rejected lists; patients. Admin only: policies + policy assistant, audit log, system logs | [frontend/app/(app)/](frontend/app/(app)/) |
+| UI | Claims upload and history; claim page (decision, agent cards, review panel, audit trail); review queue (escalated and on-hold claims); approved / rejected lists; patients. Admin only: policies + policy assistant, audit log, system logs | [frontend/app/(app)/](frontend/app/(app)/) |
 | BFF proxy | Same-origin proxy: reads the session token from the httpOnly cookie and forwards it as `Authorization`, so browser scripts never hold it | [frontend/app/api/bff/[...path]/route.ts](frontend/app/api/bff/[...path]/route.ts) |
 | REST API | Endpoints, JWT sign-in, role checks, upload validation | [backend/app/main.py](backend/app/main.py), [auth.py](backend/app/auth.py), [uploads.py](backend/app/uploads.py) |
 | Claim service | Queue and single worker, status lifecycle, hold / stop / resume / re-run, human review, crash recovery on start-up | [backend/app/claim/service.py](backend/app/claim/service.py) |
@@ -147,18 +152,32 @@ needed (ingest hold, human review). Each card shows the agent's status, run time
 ### 1.4 Decision rule ([claim/decide.py](backend/app/claim/decide.py))
 
 ```
-ESCALATE  duplicate of a stored claim
-          OR fraud score >= 0.3
-          OR insurance card not valid
+APPROVE   KYC passed + claim valid + covered + fraud score < 0.3
+REJECT    KYC failed (name not a member, or insurance card not valid)
+          OR a procedure is not covered
+          OR schema invalid (the claim form lacks a required field)
+ESCALATE  fraud score >= 0.3
           OR any agent confidence < 0.6, or an agent errored
+          OR duplicate of a stored claim
           OR a page is UNKNOWN or blurry, or a required document (claim form, ID) is missing
           OR a guardrail fired on a page
-REJECT    claimant's name is not a member, OR a procedure is not covered
-APPROVE   everything else
 ```
 
-Precedence is ESCALATE > REJECT > APPROVE. Confidence is the weighted mean of the agents that
-ran (`confidence_weights`: ingest 0.15, kyc 0.25, claims/policy/fraud 0.20 each).
+Precedence:
+1. KYC failed or a procedure not covered rejects outright, even when the claim would also
+   escalate. The escalation reasons are kept in the justification as "also flagged: ...", so a
+   fraud score is still visible.
+2. Otherwise ESCALATE > REJECT (schema invalid) > APPROVE.
+
+Only six fraud signals are scored, and each one alone reaches 0.3: `duplicate_claim` 0.9,
+`name_mismatch` 0.7, `readmission_30d` 0.7, `date_conflict` 0.6, `amount_under_10k` 0.6,
+`proc_diag_mismatch` 0.5. `id_expired`, `dob_mismatch` and `policy_mismatch` have severity 0
+and are tracked only. Missing required fields are reported apart from the fraud signals
+(`missing_fields`). On a claim form they make the schema invalid. On a prescription they are
+only tracked.
+
+Confidence is the weighted mean of the agents that ran (`confidence_weights`: ingest 0.15,
+kyc 0.25, claims/policy/fraud 0.20 each).
 
 ### 1.5 Claim status lifecycle
 
@@ -171,7 +190,92 @@ STOPPED -> PROCESSING                     resumes from the last finished step
 any -> QUEUED                             re-run, e.g. after correcting a document type
 ```
 
-### 1.6 Policy assistant ([policy_chat.py](backend/app/policy_chat.py))
+### 1.6 Queue and cache
+
+#### Queue ([claim/service.py](backend/app/claim/service.py))
+
+Claims are queued in-process, with MySQL holding every claim's status. There is no Redis,
+Celery or message broker.
+
+| Part | What it uses |
+|---|---|
+| Job hand-off | Python `ThreadPoolExecutor` inside the API process (`PIPELINE_WORKERS=1` in `.env`: one worker thread) |
+| Job status | MySQL `claim_bundle.status` (`QUEUED`, `PROCESSING`, then a final status; see 1.5) |
+| Paused / resumable run state | LangGraph checkpoints in MySQL (`lg_checkpoint*`), keyed by thread id |
+| Recovery after a restart | `recover_interrupted_claims()` at start-up re-queues claims left `QUEUED` or `PROCESSING` |
+
+1. An upload or re-run sets the claim to `QUEUED` in MySQL and submits `process_claim` to the
+   executor.
+2. The worker sets `PROCESSING`, runs the claim graph and writes the result and final status.
+3. An escalated claim pauses at `human_review`. Its state stays in the checkpoint, and the
+   reviewer's decision resumes the same run. *Stop* / *Resume* work the same way, from the last
+   finished step.
+4. Only one claim may be queued or processing at a time. New uploads get HTTP 409 until it
+   finishes, so the vision model is never hit by bursts.
+
+#### Cache ([claim/vision.py](backend/app/claim/vision.py) `_cached`, [db.py](backend/app/db.py) `cache_get` / `cache_put`)
+
+Model outputs are cached in the MySQL table `model_cache` (`cache_key`, `kind`, `model`,
+`payload`), not in Redis or memory, so they survive restarts.
+
+- **Key:** SHA-256 of the step name + the input + the model name + the prompt. A different
+  model or prompt is a different key, so a change never reuses a stale answer.
+- **Hit:** the stored JSON is returned and the model is not called.
+- **Miss:** the model is called and its reply is stored.
+
+| Step (`kind`) | Model | Key built from |
+|---|---|---|
+| `text`: transcribe a page | vision | image bytes, model, prompt |
+| `type`: classify a page | vision | image bytes, model, prompt |
+| `fields`: extract fields | text | page text, model, prompt |
+
+The same page uploaded twice is read only once. `scripts.warm_vision` fills the cache for the
+dataset ahead of time. Not cached: the policy agent's coverage call and the policy assistant,
+whose inputs depend on what is retrieved each time. KYC, fraud and decide make no model calls.
+
+#### Why not Redis
+
+- **As a cache:** a MySQL primary-key lookup takes milliseconds and the model call it saves
+  takes seconds, so Redis would not be noticeably faster. MySQL also keeps the paid-for
+  readings for good, where Redis would need disk persistence and no eviction.
+- **As a task queue:** this is where Redis (with Celery, RQ or Arq) would help. Several worker
+  processes could take claims at once, scaled apart from the API, and queued jobs would
+  survive an API restart. It is not needed for a single-machine deployment. See section 4.
+
+### 1.7 Tracing (LangSmith)
+
+Optional. With LangSmith tracing on, every run is sent to the LangSmith project named in
+`LANGSMITH_PROJECT`, where each agent and model call can be opened with its input, output,
+latency and error.
+
+![LangSmith tracing view of the medishield-claims project: a list of LangGraph traces with latency, output and input, and one trace opened to show its preprocessor, classifier, route_after_classifier and orchestrator steps, alongside separate vision_json and chat_json model-call runs](docs/images/LangSmith.png)
+
+| In LangSmith | What it is |
+|---|---|
+| `claim_graph` trace | One claim run. Tag `claim`, metadata `claim_id` and `thread_id`, so one claim can be found by its id |
+| Agent steps | Every node of the claim graph: classify, preprocess, extract, plan, duplicate check, KYC, claims, policy, fraud, decide, human review |
+| `chat_json` / `vision_json` | Every model call ([llm.py](backend/app/llm.py), `@traceable`), nested under the agent that made it, with the prompt and the parsed reply. An image is shown as its file path |
+| `LangGraph` trace | A run of the single-document pipeline ([graph.py](backend/app/graph.py)) |
+
+LangGraph traces the graph and its nodes by itself once the variables are set. The model
+client is this app's own HTTP code, so its calls are wrapped with `@traceable` to show prompts
+and replies. A cache hit (section 1.6) makes no model call, so it shows no `chat_json` /
+`vision_json` run.
+
+To turn it on, set these in `.env` and restart the backend:
+
+```ini
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=<your LangSmith API key>
+LANGSMITH_PROJECT=medishield-claims
+```
+
+Set `LANGSMITH_TRACING=false`, or leave the key empty, to turn it off. Tests always run with
+tracing off ([tests/\_\_init\_\_.py](backend/tests/__init__.py)), so they never send runs to
+the project.
+
+### 1.8 Policy assistant ([policy_chat.py](backend/app/policy_chat.py))
 
 A decision-support chat for reviewers on the Policies page. For each CPT code in a question it
 gives clinical fit (labelled as general knowledge), policy coverage (retrieved clauses only),
@@ -180,7 +284,7 @@ and a next step, and cross-checks each verdict against the clauses retrieved. It
 below `POLICY_CHAT_MIN_RELEVANCE`, in which case the model is not called), and when the model
 marks the question off topic.
 
-### 1.7 Main API
+### 1.9 Main API
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -297,6 +401,9 @@ model settings for your provider:
 
 Every key is read by [backend/app/config.py](backend/app/config.py). A missing key stops the
 app at startup and lists what is missing; there are no defaults hidden in code.
+
+Optional: `LANGSMITH_TRACING`, `LANGSMITH_ENDPOINT`, `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT`
+send every claim run and model call to LangSmith (section 1.7).
 
 ```powershell
 cd backend
@@ -440,6 +547,9 @@ cd ../frontend && npm run typecheck
   and assumes one API process owns the pipeline. Running several workers or replicas is not
   supported. On Windows, `uvicorn --reload` can leave orphaned workers serving old code on
   port 8000; kill them before restarting.
+- **No external task queue.** Jobs run on an in-process thread pool, so workers cannot be
+  scaled out, and claims waiting in the pool are re-queued only by the start-up scan after a
+  restart. Moving to Redis with Celery, RQ or Arq would fix both (section 1.6).
 - **One DB connection per call.** No connection pool; fine for one user, not for load.
 - **Two roles only** (`admin`, `agent`), fixed accounts from `create_users`; no SSO, password
   reset or per-user permissions.

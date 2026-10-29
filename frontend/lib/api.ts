@@ -49,7 +49,7 @@ export interface DashboardStats {
   avg_confidence: number | null;
   patients: number;
   review_queue?: number;
-  queue_counts?: Record<"review" | "escalated" | "approved" | "rejected", number>;
+  queue_counts?: Record<"review" | "approved" | "rejected", number>;
 }
 
 export interface Patient {

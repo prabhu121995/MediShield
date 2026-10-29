@@ -10,6 +10,8 @@ The provider comes from LLM_PROVIDER in .env:
 Every call retries with backoff, so a rate limit or a bad JSON reply does not crash the case.
 Every call can be cancelled: the request runs on its own thread and the caller polls the
 cancel hook (set by the claim graph), so stopping a claim does not wait for a slow model.
+Every call is a LangSmith "llm" run (when LANGSMITH_TRACING is on), nested under the agent
+node that made it.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from langsmith import traceable
 
 from app import config
 
@@ -202,6 +206,7 @@ def _gemini(model: str, system: str | None, parts: list[dict[str, Any]]) -> str:
 
 # ---- public API -----------------------------------------------------------------
 
+@traceable(run_type="llm", name="chat_json")
 def chat_json(system: str, user: str, model: str | None = None) -> dict[str, Any]:
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     model_name = model or config.MODEL_NAME
@@ -231,6 +236,7 @@ def _vision_payload(image_path: str | Path) -> tuple[str, str]:
     return "image/jpeg", base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+@traceable(run_type="llm", name="vision_json")
 def vision_json(image_path: str | Path, prompt: str) -> dict[str, Any]:
     mime, b64 = _vision_payload(image_path)
 

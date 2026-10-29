@@ -317,36 +317,41 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(state["docs"][0]["doc_type"], "PRESCRIPTION")
         self.assertEqual(state["docs"][0]["classifier_source"], "human_override")
 
-    # ---- KYC: member name (reject) + insurance card validity (human review) -----------------
+    # ---- KYC: member name + insurance card validity (both reject) ----------------------------
 
     def test_name_not_a_member_rejects(self):
         state = self.run_claim(claim=claim(name="Max Power"), id=id_card(name="MAX POWER"))
         self.assertEqual(self.decision(state), "REJECT")
         self.assertIn("NAME_NOT_A_MEMBER", state["kyc"]["flags"])
 
-    def test_insurance_card_saying_card_expired_goes_to_human_review(self):
+    def test_kyc_failure_rejects_even_with_fraud_and_keeps_the_fraud_visible(self):
+        state = self.run_claim(claim=claim(name="Max Power", amount=9500.0), id=id_card(name="MAX POWER"))
+        self.assertEqual(self.decision(state), "REJECT")
+        self.assertIn("amount_under_10k", state["fraud"]["tags"])
+        self.assertTrue(any(r.startswith("also flagged: fraud score") for r in state["decision"]["reasons"]))
+
+    def test_insurance_card_saying_card_expired_rejects(self):
         card = id_card(text="MediShield Health Insurance GOLD PLAN MEMBER ID CARD ** CARD EXPIRED - NOT VALID **",
                        kind="insurance member card")
         state = self.run_claim(claim=claim(), id=card)
-        self.assertEqual(self.decision(state), "ESCALATE")
-        self.assertTrue(state["kyc"]["kyc_passed"])                          # the name is a member
-        self.assertTrue(state["kyc"]["needs_review"])
+        self.assertEqual(self.decision(state), "REJECT")
+        self.assertFalse(state["kyc"]["kyc_passed"])
         self.assertIn("INSURANCE_CARD_NOT_VALID", state["kyc"]["flags"])
 
-    def test_insurance_card_expired_before_treatment_goes_to_review_without_a_fraud_tag(self):
+    def test_insurance_card_expired_before_treatment_rejects_without_a_fraud_tag(self):
         card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card",
                        expiry="2025-01-31")
         state = self.run_claim(claim=claim(), id=card)
-        self.assertEqual(self.decision(state), "ESCALATE")
+        self.assertEqual(self.decision(state), "REJECT")
         self.assertTrue(any("insurance card" in r for r in state["decision"]["reasons"]))
         self.assertNotIn("id_expired", state["fraud"]["tags"])               # KYC owns the card's expiry
 
-    def test_insurance_card_the_model_reads_as_not_valid_goes_to_review(self):
+    def test_insurance_card_the_model_reads_as_not_valid_rejects(self):
         card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card")
         card["fields"].update(card_marked_invalid=True, invalid_text="NOT VALID FOR BENEFITS")
         state = self.run_claim(claim=claim(), id=card)
-        self.assertEqual(self.decision(state), "ESCALATE")
-        self.assertIn("NOT VALID FOR BENEFITS", " ".join(state["kyc"]["review_reasons"]))
+        self.assertEqual(self.decision(state), "REJECT")
+        self.assertIn("NOT VALID FOR BENEFITS", " ".join(state["kyc"]["fail_reasons"]))
 
     def test_valid_insurance_card_passes(self):
         card = id_card(text="MediShield Health Insurance MEMBER ID CARD", kind="insurance member card")
@@ -448,9 +453,10 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertEqual(self.decision(state), "REJECT")
         self.assertFalse(state["policy"]["covered"])
 
-    def test_missing_required_fields_are_tracked_not_scored(self):
+    def test_claim_form_missing_required_fields_is_schema_invalid_and_rejects(self):
         state = self.run_claim(claim=claim(npi=None, signature=None), id=id_card())
-        self.assertEqual(self.decision(state), "APPROVE")
+        self.assertEqual(self.decision(state), "REJECT")
+        self.assertTrue(any(r.startswith("schema invalid") for r in state["decision"]["reasons"]))
         self.assertEqual(state["fraud"]["fraud_score"], 0.0)
         self.assertNotIn("missing_field", state["fraud"]["tags"])
         detail = state["fraud"]["missing_fields"][0]["detail"]
@@ -463,9 +469,9 @@ class ClaimGraphTests(unittest.TestCase):
         self.assertTrue(state["fraud"]["missing_fields"])
         self.assertEqual((state["fraud"]["fraud_score"], state["fraud"]["risk_level"]), (0.0, "LOW"))
 
-    def test_claim_form_marked_missing_required_field_is_tracked(self):
+    def test_claim_form_marked_missing_required_field_rejects(self):
         state = self.run_claim(claim=claim(missing=["physician_signature"]), id=id_card())
-        self.assertEqual(self.decision(state), "APPROVE")
+        self.assertEqual(self.decision(state), "REJECT")
         self.assertTrue(state["fraud"]["missing_fields"])
 
     def test_optional_field_marked_missing_is_ignored(self):

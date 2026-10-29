@@ -326,11 +326,10 @@ def _views(bundles: list[dict]) -> list[dict]:
     return [_bundle_view(b, pages[b["bundle_id"]]) for b in bundles]
 
 
-# A queue is a filter over claims, newest first. Review / escalated: waiting for a person.
+# A queue is a filter over claims, newest first. Review: waiting for a person (escalated or on hold).
 # Approved / rejected: the final decision, by the agents or a reviewer's override.
 QUEUES = {
     "review": {"status": ("NEEDS_REVIEW", "ON_HOLD")},
-    "escalated": {"status": "NEEDS_REVIEW", "decision": "ESCALATE"},
     "approved": {"decision": "APPROVE"},
     "rejected": {"decision": "REJECT"},
 }
@@ -347,7 +346,7 @@ def list_bundles(status: str | None = None, limit: int | None = None, q: str | N
 
 
 @app.get("/api/queues/{name}")
-def claim_queue(name: Literal["review", "escalated", "approved", "rejected"], limit: int | None = None,
+def claim_queue(name: Literal["review", "approved", "rejected"], limit: int | None = None,
                 q: str | None = None, offset: int = Query(0, ge=0), user: dict = ANY_USER):
     return _views(db.list_bundles(limit=_limit(limit), q=(q or "").strip() or None, offset=offset, **QUEUES[name]))
 

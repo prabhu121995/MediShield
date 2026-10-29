@@ -19,7 +19,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const counts: Record<string, number> = !stats ? {} : {
     "/bundles": stats.total,
     "/review": q?.review ?? attention,
-    ...(q && { "/escalated": q.escalated, "/approved": q.approved, "/rejected": q.rejected }),
+    ...(q && { "/approved": q.approved, "/rejected": q.rejected }),
     "/patients": stats.patients,
   };
   return <AppShell user={user} counts={counts}>{children}</AppShell>;

@@ -4,16 +4,19 @@ after every upstream branch has written its output into the shared state.
 
     ESCALATE  the patient already has a stored claim with the same DOS and amount (duplicate;
               the duplicate_check skipped every agent)
-              OR fraud score >= 0.3 (every fraud signal and flag, incl. missing fields)
-              OR the insurance card is not valid (KYC asks for a person)
+              OR fraud score >= 0.3 (the scored fraud signals)
               OR any agent confidence < 0.6 (a page, kyc, claims, policy, fraud)
               OR an agent errored, a page is UNKNOWN, or a required document is missing
               OR a guardrail fired on a page (injected instructions, impossible values)
-    REJECT    the claimant's name is not a member (KYC failed) OR a procedure is not covered
-    APPROVE   name is a member + card valid + covered + fraud score < 0.3
+    REJECT    KYC failed (the claimant's name is not a member, or the insurance card is not
+              valid) OR a procedure is not covered OR the schema is invalid (the claim form
+              lacks a required field; a prescription's missing fields are only tracked)
+    APPROVE   KYC passed + claim valid + covered + fraud score < 0.3
 
-Precedence ESCALATE > REJECT > APPROVE: a human look is cheaper than wrongly rejecting a
-policyholder, and a suspected fraud must reach a person, not an automatic letter.
+Precedence: KYC failed or a procedure not covered REJECTS outright, even with a fraud score
+>= 0.3 or another escalation; those are kept in the reasons ("also flagged: ...") so the fraud
+stays visible. Otherwise ESCALATE > REJECT (schema invalid) > APPROVE: a human look is cheaper
+than wrongly rejecting a policyholder over a form.
 
 Confidence is the weighted mean of the confidences of the agents that ran. Thresholds and
 weights: pipeline_rules.json ("thresholds", "confidence_weights").
@@ -87,8 +90,6 @@ def decide(state: ClaimState) -> dict:
         escalate.append("unrecognised document(s): " + ", ".join(plan["unknown_documents"]))
     if plan.get("missing_required"):
         escalate.append("missing required document(s): " + ", ".join(plan["missing_required"]))
-    if kyc and "error" not in kyc and kyc.get("needs_review"):
-        escalate.extend(kyc.get("review_reasons") or ["KYC asks for human review"])
     if fraud.get("fraud_score", 0.0) >= th["fraud_escalate_min"]:
         escalate.append(f"fraud score {fraud['fraud_score']:.2f} ({', '.join(fraud.get('tags', []))})")
 
@@ -96,13 +97,19 @@ def decide(state: ClaimState) -> dict:
         reject.append("KYC failed: " + ", ".join(kyc.get("fail_reasons") or kyc.get("flags", [])))
     if policy and "error" not in policy and policy.get("covered") is False:
         reject.append("procedure not covered: " + "; ".join(policy.get("exclusions", [])))
+    hard_reject = bool(reject)                     # KYC failed / not covered outweigh any escalation
+    for m in fraud.get("missing_fields") or []:
+        if m.get("doc_type") == "CLAIM_FORM":
+            reject.append(f"schema invalid: {m['detail']}")
 
-    if escalate:
+    if hard_reject:
+        decision, reasons = "REJECT", reject + [f"also flagged: {e}" for e in escalate]
+    elif escalate:
         decision, reasons = "ESCALATE", escalate + reject
     elif reject:
         decision, reasons = "REJECT", reject
     else:
-        decision, reasons = "APPROVE", ["KYC passed, all procedures covered, fraud score "
+        decision, reasons = "APPROVE", ["KYC passed, claim valid, all procedures covered, fraud score "
                                         f"{fraud.get('fraud_score', 0.0):.2f} < {th['fraud_escalate_min']}"]
 
     lead = {"ESCALATE": "Escalated to human review", "REJECT": "Rejected", "APPROVE": "Approved"}[decision]

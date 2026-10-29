@@ -87,7 +87,10 @@ def ensure_idle(exclude: str | None = None) -> None:
 
 def run_config(thread_id: str, pages: int = 0) -> dict:
     # Two graph steps per page (classify, then preprocess + extract), plus the fixed agents.
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 3 * pages + 30}
+    # run_name / tags / metadata label the run in LangSmith (LANGSMITH_* in .env).
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 3 * pages + 30,
+            "run_name": "claim_graph", "tags": ["claim"],
+            "metadata": {"claim_id": thread_id.split(":")[0], "thread_id": thread_id}}
 
 
 def run_claim_graph(claim_id: str, title: str, documents: list[dict], thread_id: str | None = None) -> dict:

@@ -10,8 +10,8 @@ KYC agent. Runs in parallel with the claims -> policy branch.
    kyc.insurance_card_keywords), its expiry date must not be before the treatment date
    (today when no treatment date was read), the card must not print an expired status (rules:
    kyc.card_expired_phrases), and the model must not have read it as marked invalid.
-   A card that is not valid does not reject: it sends the claim to a person (needs_review ->
-   ESCALATE). Other ID pages (driver's licence, passport) are not checked here.
+   A card that is not valid fails KYC -> REJECT. Other ID pages (driver's licence, passport)
+   are not checked here.
 
 No name on any page -> unsure (confidence 0.5) -> ESCALATE. Every other identity question
 (a non-card ID's expiry, DOB or policy differences, name differences between pages) is a
@@ -77,7 +77,7 @@ def card_invalid(doc: dict, rules: dict, ref: date, ref_source: str) -> str | No
 
 def check(docs: list[dict], repo, rules: dict | None = None) -> dict:
     rules = (rules or config.RULES)["kyc"]
-    checks, fail, flags, review = [], [], [], []
+    checks, fail, flags = [], [], []
 
     names = candidate_names(docs)
     member, matched_name = None, None
@@ -106,9 +106,8 @@ def check(docs: list[dict], repo, rules: dict | None = None) -> dict:
     for d in cards:
         invalid = card_invalid(d, rules, ref, ref_source)
         if invalid:
-            flags.append("INSURANCE_CARD_NOT_VALID")
-            review.append(f"insurance card {d['file_name']} {invalid}")
-            checks.append({"check": "insurance_card", "passed": False, "detail": f"{d['file_name']} {invalid}"})
+            fail.append("INSURANCE_CARD_NOT_VALID")
+            checks.append({"check": "insurance_card", "passed": False, "detail": f"insurance card {d['file_name']} {invalid}"})
         else:
             expiry = (d.get("fields") or {}).get("id_expiry_date")
             checks.append({"check": "insurance_card", "passed": True,
@@ -119,14 +118,10 @@ def check(docs: list[dict], repo, rules: dict | None = None) -> dict:
     summary = ("failed: " + ", ".join(dict.fromkeys(fail))) if fail else \
         ("uncertain: no name to check" if not names else
          f"passed: {member['member_id']} ({member['full_name']})" if member else f"passed: '{matched_name}' is a member")
-    if review:
-        summary += "; insurance card not valid: needs human review"
     return {
         "kyc_passed": passed,
-        "needs_review": bool(review),
-        "review_reasons": review,
         "flags": list(dict.fromkeys(fail + flags)),
-        "fail_reasons": [c["detail"] for c in checks if c["passed"] is False and c["check"] == "member_name"],
+        "fail_reasons": [c["detail"] for c in checks if c["passed"] is False],
         "checks": checks,
         "member": member,
         "insurance_cards": [d["file_name"] for d in cards],

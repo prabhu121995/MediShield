@@ -1,3 +1,8 @@
+# Tests never send traces to LangSmith. Set before app.config loads .env (which does not override).
+import os
+
+os.environ["LANGSMITH_TRACING"] = "false"
+
 # Tests never write audit rows to the real database; tests that check audit rows set their own sink.
 from app import audit
 
